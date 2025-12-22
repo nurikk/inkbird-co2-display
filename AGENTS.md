@@ -4,7 +4,7 @@ This file provides guidelines for AI coding agents working in this repository.
 
 ## Project Overview
 
-- **Platform**: ESP32 (NodeMCU-32S board)
+- **Platform**: ESP32-C3 (ESP32-C3-DevKitM-1 board)
 - **Framework**: ESP-IDF v5.5.0 via PlatformIO
 - **Language**: C (embedded)
 - **Purpose**: IoT CO2 sensor display device
