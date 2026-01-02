@@ -1,0 +1,10 @@
+# Enable frame pointer for better backtraces
+CONFIG_ESP_SYSTEM_USE_EH_FRAME=y
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+
+# Increase task watchdog timeout (e-paper refresh can be slow)
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# Enable more verbose logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
