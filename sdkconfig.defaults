@@ -8,3 +8,51 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 # Enable more verbose logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# =============================================================================
+# LVGL Configuration for E-Paper (1-bit monochrome)
+# =============================================================================
+
+# Color depth: 1-bit for monochrome e-paper
+CONFIG_LV_COLOR_DEPTH_1=y
+CONFIG_LV_COLOR_DEPTH=1
+
+# Memory settings (ESP32-C3 has limited RAM)
+CONFIG_LV_MEM_SIZE_KILOBYTES=48
+
+# Display refresh period (slow for e-paper)
+CONFIG_LV_DEF_REFR_PERIOD=1000
+
+# DPI setting for 4.2" 400x300 display (~118 DPI)
+CONFIG_LV_DPI_DEF=118
+
+# Enable required widgets
+CONFIG_LV_USE_LABEL=y
+CONFIG_LV_USE_CHART=y
+CONFIG_LV_USE_LINE=y
+
+# Enable layouts
+CONFIG_LV_USE_GRID=y
+CONFIG_LV_USE_FLEX=y
+
+# Fonts - enable larger fonts for CO2 display
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+
+# Drawing support for monochrome
+CONFIG_LV_USE_DRAW_SW=y
+CONFIG_LV_DRAW_SW_SUPPORT_I1=y
+CONFIG_LV_DRAW_SW_COMPLEX=y
+
+# Theme - use simple theme for B/W
+CONFIG_LV_USE_THEME_SIMPLE=y
+CONFIG_LV_USE_THEME_DEFAULT=y
+
+# Disable animations (not useful for e-paper)
+CONFIG_LV_USE_SYSMON=n
+
+# Buffer alignment
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=8
+CONFIG_LV_DRAW_BUF_ALIGN=4

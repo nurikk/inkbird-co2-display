@@ -1,600 +1,212 @@
 /**
- * E-Paper 4.2" B/W Module - Hello World Demo
- * 
- * Based on Waveshare official Arduino code
- * BUSY: LOW = busy, HIGH = idle
+ * @file main.c
+ * @brief CO2 Sensor Display - Main Application
+ *
+ * ESP32-C3 based CO2 sensor display using LVGL on 4.2" e-paper.
+ * Displays readings from 4 CO2 sensors with historical charts.
  */
 
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
 #include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 
 #include "esp_log.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
+#include "esp_timer.h"
 
-static const char *TAG = "epd";
+#include "lvgl.h"
 
-// Pin configuration
-#define PIN_MOSI    GPIO_NUM_7
-#define PIN_SCK     GPIO_NUM_6
-#define PIN_CS      GPIO_NUM_10
-#define PIN_DC      GPIO_NUM_1
-#define PIN_RST     GPIO_NUM_0
-#define PIN_BUSY    GPIO_NUM_3
+#include "epd_driver.h"
+#include "sensor_data.h"
+#include "synthetic_data.h"
+#include "ui_co2_display.h"
 
-// Display size
-#define EPD_WIDTH   400
-#define EPD_HEIGHT  300
+static const char *TAG = "main";
 
-static spi_device_handle_t s_spi = NULL;
+// Update intervals
+#define LVGL_TICK_PERIOD_MS     10      // LVGL tick period
+#define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
+#define DISPLAY_REFRESH_MS      60000   // E-paper refresh interval (1 minute)
 
-// Framebuffer (1 bit per pixel, 400x300 = 15000 bytes)
-static uint8_t *s_framebuffer = NULL;
+// FreeRTOS timer handles
+static TimerHandle_t s_lvgl_tick_timer = NULL;
+static TimerHandle_t s_sensor_timer = NULL;
+static TimerHandle_t s_refresh_timer = NULL;
 
-// Simple 8x8 font (ASCII 32-127)
-static const uint8_t font8x8[][8] = {
-    // Space (32)
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-    // ! (33)
-    {0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00},
-    // " (34)
-    {0x6C, 0x6C, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00},
-    // # (35)
-    {0x6C, 0xFE, 0x6C, 0x6C, 0xFE, 0x6C, 0x00, 0x00},
-    // $ (36)
-    {0x18, 0x7E, 0xC0, 0x7C, 0x06, 0xFC, 0x18, 0x00},
-    // % (37)
-    {0xC6, 0xCC, 0x18, 0x30, 0x66, 0xC6, 0x00, 0x00},
-    // & (38)
-    {0x38, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0x76, 0x00},
-    // ' (39)
-    {0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00},
-    // ( (40)
-    {0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00},
-    // ) (41)
-    {0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00},
-    // * (42)
-    {0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00},
-    // + (43)
-    {0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00},
-    // , (44)
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30},
-    // - (45)
-    {0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00},
-    // . (46)
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00},
-    // / (47)
-    {0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x00, 0x00},
-    // 0 (48)
-    {0x7C, 0xCE, 0xDE, 0xF6, 0xE6, 0xC6, 0x7C, 0x00},
-    // 1 (49)
-    {0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00},
-    // 2 (50)
-    {0x7C, 0xC6, 0x06, 0x1C, 0x70, 0xC6, 0xFE, 0x00},
-    // 3 (51)
-    {0x7C, 0xC6, 0x06, 0x3C, 0x06, 0xC6, 0x7C, 0x00},
-    // 4 (52)
-    {0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x0C, 0x00},
-    // 5 (53)
-    {0xFE, 0xC0, 0xFC, 0x06, 0x06, 0xC6, 0x7C, 0x00},
-    // 6 (54)
-    {0x3C, 0x60, 0xC0, 0xFC, 0xC6, 0xC6, 0x7C, 0x00},
-    // 7 (55)
-    {0xFE, 0xC6, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00},
-    // 8 (56)
-    {0x7C, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0x7C, 0x00},
-    // 9 (57)
-    {0x7C, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0x78, 0x00},
-    // : (58)
-    {0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00},
-    // ; (59)
-    {0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x30},
-    // < (60)
-    {0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x00},
-    // = (61)
-    {0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00},
-    // > (62)
-    {0x30, 0x18, 0x0C, 0x06, 0x0C, 0x18, 0x30, 0x00},
-    // ? (63)
-    {0x7C, 0xC6, 0x0C, 0x18, 0x18, 0x00, 0x18, 0x00},
-    // @ (64)
-    {0x7C, 0xC6, 0xDE, 0xDE, 0xDC, 0xC0, 0x7C, 0x00},
-    // A (65)
-    {0x38, 0x6C, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0x00},
-    // B (66)
-    {0xFC, 0xC6, 0xC6, 0xFC, 0xC6, 0xC6, 0xFC, 0x00},
-    // C (67)
-    {0x7C, 0xC6, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00},
-    // D (68)
-    {0xF8, 0xCC, 0xC6, 0xC6, 0xC6, 0xCC, 0xF8, 0x00},
-    // E (69)
-    {0xFE, 0xC0, 0xC0, 0xFC, 0xC0, 0xC0, 0xFE, 0x00},
-    // F (70)
-    {0xFE, 0xC0, 0xC0, 0xFC, 0xC0, 0xC0, 0xC0, 0x00},
-    // G (71)
-    {0x7C, 0xC6, 0xC0, 0xCE, 0xC6, 0xC6, 0x7C, 0x00},
-    // H (72)
-    {0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0x00},
-    // I (73)
-    {0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00},
-    // J (74)
-    {0x1E, 0x06, 0x06, 0x06, 0xC6, 0xC6, 0x7C, 0x00},
-    // K (75)
-    {0xC6, 0xCC, 0xD8, 0xF0, 0xD8, 0xCC, 0xC6, 0x00},
-    // L (76)
-    {0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xFE, 0x00},
-    // M (77)
-    {0xC6, 0xEE, 0xFE, 0xD6, 0xC6, 0xC6, 0xC6, 0x00},
-    // N (78)
-    {0xC6, 0xE6, 0xF6, 0xDE, 0xCE, 0xC6, 0xC6, 0x00},
-    // O (79)
-    {0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00},
-    // P (80)
-    {0xFC, 0xC6, 0xC6, 0xFC, 0xC0, 0xC0, 0xC0, 0x00},
-    // Q (81)
-    {0x7C, 0xC6, 0xC6, 0xC6, 0xD6, 0xDE, 0x7C, 0x06},
-    // R (82)
-    {0xFC, 0xC6, 0xC6, 0xFC, 0xD8, 0xCC, 0xC6, 0x00},
-    // S (83)
-    {0x7C, 0xC6, 0xC0, 0x7C, 0x06, 0xC6, 0x7C, 0x00},
-    // T (84)
-    {0xFE, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00},
-    // U (85)
-    {0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00},
-    // V (86)
-    {0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00},
-    // W (87)
-    {0xC6, 0xC6, 0xC6, 0xD6, 0xFE, 0xEE, 0xC6, 0x00},
-    // X (88)
-    {0xC6, 0x6C, 0x38, 0x38, 0x6C, 0xC6, 0xC6, 0x00},
-    // Y (89)
-    {0xC6, 0xC6, 0x6C, 0x38, 0x18, 0x18, 0x18, 0x00},
-    // Z (90)
-    {0xFE, 0x0E, 0x1C, 0x38, 0x70, 0xE0, 0xFE, 0x00},
-    // [ (91)
-    {0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00},
-    // \ (92)
-    {0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x00, 0x00},
-    // ] (93)
-    {0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00},
-    // ^ (94)
-    {0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00},
-    // _ (95)
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF},
-    // ` (96)
-    {0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00},
-    // a (97)
-    {0x00, 0x00, 0x7C, 0x06, 0x7E, 0xC6, 0x7E, 0x00},
-    // b (98)
-    {0xC0, 0xC0, 0xFC, 0xC6, 0xC6, 0xC6, 0xFC, 0x00},
-    // c (99)
-    {0x00, 0x00, 0x7C, 0xC6, 0xC0, 0xC6, 0x7C, 0x00},
-    // d (100)
-    {0x06, 0x06, 0x7E, 0xC6, 0xC6, 0xC6, 0x7E, 0x00},
-    // e (101)
-    {0x00, 0x00, 0x7C, 0xC6, 0xFE, 0xC0, 0x7C, 0x00},
-    // f (102)
-    {0x1C, 0x36, 0x30, 0x7C, 0x30, 0x30, 0x30, 0x00},
-    // g (103)
-    {0x00, 0x00, 0x7E, 0xC6, 0xC6, 0x7E, 0x06, 0x7C},
-    // h (104)
-    {0xC0, 0xC0, 0xFC, 0xC6, 0xC6, 0xC6, 0xC6, 0x00},
-    // i (105)
-    {0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    // j (106)
-    {0x06, 0x00, 0x0E, 0x06, 0x06, 0x66, 0x66, 0x3C},
-    // k (107)
-    {0xC0, 0xC0, 0xCC, 0xD8, 0xF0, 0xD8, 0xCC, 0x00},
-    // l (108)
-    {0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    // m (109)
-    {0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xC6, 0xC6, 0x00},
-    // n (110)
-    {0x00, 0x00, 0xFC, 0xC6, 0xC6, 0xC6, 0xC6, 0x00},
-    // o (111)
-    {0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0x00},
-    // p (112)
-    {0x00, 0x00, 0xFC, 0xC6, 0xC6, 0xFC, 0xC0, 0xC0},
-    // q (113)
-    {0x00, 0x00, 0x7E, 0xC6, 0xC6, 0x7E, 0x06, 0x06},
-    // r (114)
-    {0x00, 0x00, 0xDC, 0xE6, 0xC0, 0xC0, 0xC0, 0x00},
-    // s (115)
-    {0x00, 0x00, 0x7E, 0xC0, 0x7C, 0x06, 0xFC, 0x00},
-    // t (116)
-    {0x30, 0x30, 0x7C, 0x30, 0x30, 0x36, 0x1C, 0x00},
-    // u (117)
-    {0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0x7E, 0x00},
-    // v (118)
-    {0x00, 0x00, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00},
-    // w (119)
-    {0x00, 0x00, 0xC6, 0xC6, 0xD6, 0xFE, 0x6C, 0x00},
-    // x (120)
-    {0x00, 0x00, 0xC6, 0x6C, 0x38, 0x6C, 0xC6, 0x00},
-    // y (121)
-    {0x00, 0x00, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x7C},
-    // z (122)
-    {0x00, 0x00, 0xFE, 0x0C, 0x38, 0x60, 0xFE, 0x00},
-};
+// Flag to trigger display refresh
+static volatile bool s_do_refresh = false;
 
-// LUT tables from Waveshare
-static const uint8_t lut_vcom0[] = {
-    0x00, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x00, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00,
-};
-
-static const uint8_t lut_ww[] = {
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_bw[] = {
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_bb[] = {
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_wb[] = {
-    0x20, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x10, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-// ----------------------------------------------------------------------------
-// GPIO helpers
-// ----------------------------------------------------------------------------
-static void gpio_init_output(gpio_num_t pin)
+/**
+ * @brief LVGL tick timer callback
+ */
+static void lvgl_tick_cb(TimerHandle_t timer)
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << pin),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
+    (void)timer;
+    lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
-static void gpio_init_input(gpio_num_t pin)
+/**
+ * @brief Sensor data update timer callback
+ */
+static void sensor_update_cb(TimerHandle_t timer)
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << pin),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
+    (void)timer;
+    
+    // Generate new synthetic data
+    synthetic_data_update();
+    
+    // Update UI with new data
+    ui_co2_display_update();
+    
+    ESP_LOGI(TAG, "Sensor data updated (step %lu)", 
+             (unsigned long)synthetic_data_get_step());
 }
 
-// ----------------------------------------------------------------------------
-// E-Paper low-level functions
-// ----------------------------------------------------------------------------
-static void epd_cmd(uint8_t cmd)
+/**
+ * @brief Display refresh timer callback
+ */
+static void display_refresh_cb(TimerHandle_t timer)
 {
-    gpio_set_level(PIN_DC, 0);
-    gpio_set_level(PIN_CS, 0);
-    spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
-    spi_device_polling_transmit(s_spi, &t);
-    gpio_set_level(PIN_CS, 1);
+    (void)timer;
+    s_do_refresh = true;
 }
 
-static void epd_data(uint8_t data)
+/**
+ * @brief LVGL task - handles rendering and display updates
+ */
+static void lvgl_task(void *arg)
 {
-    gpio_set_level(PIN_DC, 1);
-    gpio_set_level(PIN_CS, 0);
-    spi_transaction_t t = { .length = 8, .tx_buffer = &data };
-    spi_device_polling_transmit(s_spi, &t);
-    gpio_set_level(PIN_CS, 1);
-}
-
-static void epd_wait_busy(void)
-{
-    int count = 0;
-    while (gpio_get_level(PIN_BUSY) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        count++;
-        if (count > 3000) {
-            ESP_LOGE(TAG, "Timeout!");
-            return;
-        }
-    }
-}
-
-static void epd_reset(void)
-{
-    gpio_set_level(PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
-    gpio_set_level(PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
-    gpio_set_level(PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-}
-
-// ----------------------------------------------------------------------------
-// SPI init
-// ----------------------------------------------------------------------------
-static esp_err_t spi_init(void)
-{
-    spi_bus_config_t bus = {
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = -1,
-        .sclk_io_num = PIN_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4096,
-    };
+    (void)arg;
     
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) return ret;
+    ESP_LOGI(TAG, "LVGL task started");
     
-    spi_device_interface_config_t dev = {
-        .clock_speed_hz = 4000000,
-        .mode = 0,
-        .spics_io_num = -1,
-        .queue_size = 1,
-    };
-    
-    return spi_bus_add_device(SPI2_HOST, &dev, &s_spi);
-}
-
-// ----------------------------------------------------------------------------
-// Set LUT
-// ----------------------------------------------------------------------------
-static void epd_set_lut(void)
-{
-    epd_cmd(0x20);
-    for (int i = 0; i < 44; i++) epd_data(lut_vcom0[i]);
-    
-    epd_cmd(0x21);
-    for (int i = 0; i < 42; i++) epd_data(lut_ww[i]);
-    
-    epd_cmd(0x22);
-    for (int i = 0; i < 42; i++) epd_data(lut_bw[i]);
-    
-    epd_cmd(0x23);
-    for (int i = 0; i < 42; i++) epd_data(lut_bb[i]);
-    
-    epd_cmd(0x24);
-    for (int i = 0; i < 42; i++) epd_data(lut_wb[i]);
-}
-
-// ----------------------------------------------------------------------------
-// Initialize display
-// ----------------------------------------------------------------------------
-static void epd_init(void)
-{
-    epd_reset();
-    
-    epd_cmd(0x01);
-    epd_data(0x03);
-    epd_data(0x00);
-    epd_data(0x2b);
-    epd_data(0x2b);
-    
-    epd_cmd(0x06);
-    epd_data(0x17);
-    epd_data(0x17);
-    epd_data(0x17);
-    
-    epd_cmd(0x04);
-    epd_wait_busy();
-    
-    epd_cmd(0x00);
-    epd_data(0xbf);
-    
-    epd_cmd(0x30);
-    epd_data(0x3c);
-    
-    epd_cmd(0x61);
-    epd_data(0x01);
-    epd_data(0x90);
-    epd_data(0x01);
-    epd_data(0x2c);
-    
-    epd_cmd(0x82);
-    epd_data(0x12);
-    
-    epd_cmd(0x50);
-    epd_data(0x97);
-    
-    epd_set_lut();
-}
-
-// ----------------------------------------------------------------------------
-// Framebuffer functions
-// ----------------------------------------------------------------------------
-static void fb_init(void)
-{
-    int size = (EPD_WIDTH / 8) * EPD_HEIGHT;
-    s_framebuffer = malloc(size);
-    memset(s_framebuffer, 0xFF, size);  // White
-}
-
-static void fb_clear(uint8_t color)
-{
-    int size = (EPD_WIDTH / 8) * EPD_HEIGHT;
-    memset(s_framebuffer, color ? 0xFF : 0x00, size);
-}
-
-static void fb_set_pixel(int x, int y, int black)
-{
-    if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) return;
-    
-    int byte_idx = (y * (EPD_WIDTH / 8)) + (x / 8);
-    int bit_idx = 7 - (x % 8);
-    
-    if (black) {
-        s_framebuffer[byte_idx] &= ~(1 << bit_idx);  // Black = 0
-    } else {
-        s_framebuffer[byte_idx] |= (1 << bit_idx);   // White = 1
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, int scale)
-{
-    if (c < 32 || c > 122) c = '?';
-    int idx = c - 32;
-    
-    for (int row = 0; row < 8; row++) {
-        uint8_t line = font8x8[idx][row];
-        for (int col = 0; col < 8; col++) {
-            if (line & (0x80 >> col)) {
-                // Draw scaled pixel
-                for (int sy = 0; sy < scale; sy++) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        fb_set_pixel(x + col * scale + sx, y + row * scale + sy, 1);
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *str, int scale)
-{
-    int orig_x = x;
-    while (*str) {
-        if (*str == '\n') {
-            x = orig_x;
-            y += 8 * scale + 2;
-        } else {
-            fb_draw_char(x, y, *str, scale);
-            x += 8 * scale;
-        }
-        str++;
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Display framebuffer
-// ----------------------------------------------------------------------------
-static void epd_display(void)
-{
-    int w = EPD_WIDTH / 8;
-    int h = EPD_HEIGHT;
-    
-    epd_cmd(0x61);
-    epd_data(EPD_WIDTH >> 8);
-    epd_data(EPD_WIDTH & 0xff);
-    epd_data(EPD_HEIGHT >> 8);
-    epd_data(EPD_HEIGHT & 0xff);
-    
-    // Old data (all white for full refresh)
-    epd_cmd(0x10);
-    for (int i = 0; i < w * h; i++) {
-        epd_data(0xFF);
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(2));
-    
-    // New data (framebuffer)
-    epd_cmd(0x13);
-    for (int i = 0; i < w * h; i++) {
-        epd_data(s_framebuffer[i]);
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(2));
-    
-    // Refresh
-    epd_set_lut();
-    epd_cmd(0x12);
+    // Initial display refresh
     vTaskDelay(pdMS_TO_TICKS(100));
-    epd_wait_busy();
+    
+    // Let LVGL render the initial frame
+    lv_timer_handler();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    lv_timer_handler();
+    
+    // Refresh e-paper display
+    ESP_LOGI(TAG, "Initial display refresh...");
+    epd_refresh();
+    
+    while (1) {
+        // Process LVGL tasks
+        uint32_t delay_ms = lv_timer_handler();
+        
+        // Check if we need to refresh the e-paper
+        if (s_do_refresh) {
+            s_do_refresh = false;
+            
+            // Re-render and refresh display
+            lv_timer_handler();
+            epd_refresh();
+        }
+        
+        // Clamp delay to reasonable range
+        if (delay_ms < 5) delay_ms = 5;
+        if (delay_ms > 100) delay_ms = 100;
+        
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
 }
 
-// ----------------------------------------------------------------------------
-// Main
-// ----------------------------------------------------------------------------
+/**
+ * @brief Application entry point
+ */
 void app_main(void)
 {
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "================================");
-    ESP_LOGI(TAG, "  E-Paper Hello World Demo");
-    ESP_LOGI(TAG, "================================");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  CO2 Sensor Display");
+    ESP_LOGI(TAG, "  ESP32-C3 + LVGL + E-Paper");
+    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
     
-    // Init GPIOs
-    gpio_init_output(PIN_RST);
-    gpio_init_output(PIN_DC);
-    gpio_init_output(PIN_CS);
-    gpio_init_input(PIN_BUSY);
-    
-    gpio_set_level(PIN_RST, 1);
-    gpio_set_level(PIN_DC, 1);
-    gpio_set_level(PIN_CS, 1);
-    
-    // Init SPI
-    if (spi_init() != ESP_OK) {
-        ESP_LOGE(TAG, "SPI init failed!");
+    // Initialize e-paper display hardware
+    ESP_LOGI(TAG, "Initializing e-paper display...");
+    esp_err_t ret = epd_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "E-paper init failed!");
         return;
     }
     
-    // Init framebuffer
-    fb_init();
+    // Initialize LVGL
+    ESP_LOGI(TAG, "Initializing LVGL...");
+    lv_init();
     
-    // Init display
-    ESP_LOGI(TAG, "Initializing display...");
-    epd_init();
+    // Initialize LVGL display driver
+    ret = epd_lvgl_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LVGL display driver init failed!");
+        return;
+    }
     
-    // Draw Hello World
-    ESP_LOGI(TAG, "Drawing Hello World...");
-    fb_clear(1);  // White background
+    // Initialize sensor data module
+    ESP_LOGI(TAG, "Initializing sensor data...");
+    sensor_data_init();
     
-    // Draw centered "Hello World!" at scale 3
-    const char *text = "Hello World!";
-    int text_width = strlen(text) * 8 * 3;
-    int x = (EPD_WIDTH - text_width) / 2;
-    int y = (EPD_HEIGHT - 8 * 3) / 2;
-    fb_draw_string(x, y, text, 3);
+    // Initialize synthetic data generator and pre-fill history
+    ESP_LOGI(TAG, "Generating initial sensor data...");
+    synthetic_data_init();
+    synthetic_data_prefill_history(SENSOR_HISTORY_SIZE);
     
-    // Draw some additional text
-    fb_draw_string(10, 10, "CO2 Display Project", 2);
-    fb_draw_string(10, EPD_HEIGHT - 20, "ESP32-C3 + Waveshare 4.2\"", 1);
+    // Initialize UI
+    ESP_LOGI(TAG, "Creating UI...");
+    ui_co2_display_init();
+    ui_co2_display_update();
     
-    // Update display
-    ESP_LOGI(TAG, "Updating display...");
-    epd_display();
+    // Create LVGL tick timer
+    s_lvgl_tick_timer = xTimerCreate(
+        "lvgl_tick",
+        pdMS_TO_TICKS(LVGL_TICK_PERIOD_MS),
+        pdTRUE,  // Auto-reload
+        NULL,
+        lvgl_tick_cb
+    );
+    xTimerStart(s_lvgl_tick_timer, 0);
     
-    ESP_LOGI(TAG, "Done!");
+    // Create sensor update timer
+    s_sensor_timer = xTimerCreate(
+        "sensor_update",
+        pdMS_TO_TICKS(SENSOR_UPDATE_MS),
+        pdTRUE,  // Auto-reload
+        NULL,
+        sensor_update_cb
+    );
+    xTimerStart(s_sensor_timer, 0);
     
+    // Create display refresh timer
+    s_refresh_timer = xTimerCreate(
+        "display_refresh",
+        pdMS_TO_TICKS(DISPLAY_REFRESH_MS),
+        pdTRUE,  // Auto-reload
+        NULL,
+        display_refresh_cb
+    );
+    xTimerStart(s_refresh_timer, 0);
+    
+    // Create LVGL task
+    ESP_LOGI(TAG, "Starting LVGL task...");
+    xTaskCreate(
+        lvgl_task,
+        "lvgl",
+        8192,    // Stack size
+        NULL,
+        5,       // Priority
+        NULL
+    );
+    
+    ESP_LOGI(TAG, "Initialization complete!");
+    ESP_LOGI(TAG, "Display will refresh every %d seconds", DISPLAY_REFRESH_MS / 1000);
+    
+    // Main task can sleep - everything runs in timers and tasks
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
