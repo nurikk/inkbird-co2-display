@@ -19,15 +19,10 @@
 
 #include "epd_driver.h"
 #include "sensor_data.h"
-#include "synthetic_data.h"
 #include "ui_co2_display.h"
 #include "inkbird_ble.h"
 
 static const char *TAG = "main";
-
-// Set to true to use synthetic data (for testing without sensors)
-// Set to false to use real BLE sensors
-#define USE_SYNTHETIC_DATA  false
 
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
@@ -119,19 +114,12 @@ static void download_sensor_history(uint8_t sensor_idx)
 /**
  * @brief Sensor data update timer callback
  *
- * In BLE mode: copies readings from BLE module to sensor_data
- * In synthetic mode: generates fake data for testing
+ * Copies readings from BLE module to sensor_data.
  */
 static void sensor_update_cb(TimerHandle_t timer)
 {
     (void)timer;
 
-#if USE_SYNTHETIC_DATA
-    // Generate new synthetic data for testing
-    synthetic_data_update();
-    ESP_LOGI(TAG, "Sensor data updated (synthetic, step %lu)", 
-             (unsigned long)synthetic_data_get_step());
-#else
     // Copy readings from BLE module to sensor_data
     for (int i = 0; i < SENSOR_COUNT; i++) {
         inkbird_reading_t ble_reading = inkbird_ble_get_reading(i);
@@ -154,7 +142,6 @@ static void sensor_update_cb(TimerHandle_t timer)
         }
     }
     ESP_LOGI(TAG, "Sensor data updated from BLE");
-#endif
 }
 
 /**
@@ -283,100 +270,84 @@ void app_main(void)
         }
     }
 
-#if USE_SYNTHETIC_DATA
-    // Initialize synthetic data generator for testing
-    ESP_LOGI(TAG, "Using SYNTHETIC data (no BLE)");
-    synthetic_data_init();
-    synthetic_data_prefill_history(SENSOR_HISTORY_SIZE);
-
-    // Initialize UI for synthetic mode
-    ESP_LOGI(TAG, "Initializing UI...");
-    ui_co2_display_init();
-#else
     // Initialize BLE for Inkbird sensors
     ESP_LOGI(TAG, "Initializing Bluetooth for Inkbird sensors...");
     ret = inkbird_ble_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE init failed! Falling back to synthetic data.");
-        synthetic_data_init();
-        synthetic_data_prefill_history(SENSOR_HISTORY_SIZE);
+        ESP_LOGE(TAG, "BLE init failed!");
+        return;
+    }
 
-        // Initialize UI for fallback mode
-        ESP_LOGI(TAG, "Initializing UI...");
-        ui_co2_display_init();
-    } else {
-        // Initialize UI
-        ESP_LOGI(TAG, "Initializing UI...");
-        ui_co2_display_init();
+    // Initialize UI
+    ESP_LOGI(TAG, "Initializing UI...");
+    ui_co2_display_init();
 
-        // Show loading screen immediately
-        ESP_LOGI(TAG, "Showing loading screen...");
-        ui_co2_display_loading();
-        epd_refresh();
+    // Show loading screen immediately
+    ESP_LOGI(TAG, "Showing loading screen...");
+    ui_co2_display_loading();
+    epd_refresh();
 
-        // ========== PHASE 1: Read current real-time values ==========
-        ESP_LOGI(TAG, "");
-        ESP_LOGI(TAG, "========================================");
-        ESP_LOGI(TAG, "  Phase 1: Reading Current Sensor Values");
-        ESP_LOGI(TAG, "========================================");
-        for (int i = 0; i < SENSOR_COUNT; i++) {
-            if (inkbird_ble_is_sensor_enabled(i)) {
-                read_initial_sensor_value(i);
-                vTaskDelay(pdMS_TO_TICKS(1000));  // Brief delay between sensors
-            }
+    // ========== PHASE 1: Read current real-time values ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 1: Reading Current Sensor Values");
+    ESP_LOGI(TAG, "========================================");
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (inkbird_ble_is_sensor_enabled(i)) {
+            read_initial_sensor_value(i);
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Brief delay between sensors
         }
+    }
 
-        // ========== PHASE 2: Render display with current values ==========
-        ESP_LOGI(TAG, "");
-        ESP_LOGI(TAG, "========================================");
-        ESP_LOGI(TAG, "  Phase 2: Displaying Current Values");
-        ESP_LOGI(TAG, "========================================");
-        ui_co2_display_update();
-        epd_refresh();
+    // ========== PHASE 2: Render display with current values ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 2: Displaying Current Values");
+    ESP_LOGI(TAG, "========================================");
+    ui_co2_display_update();
+    epd_refresh();
 
 #if DOWNLOAD_HISTORY_ON_STARTUP
-        // ========== PHASE 3: Download historical data ==========
-        ESP_LOGI(TAG, "");
-        ESP_LOGI(TAG, "========================================");
-        ESP_LOGI(TAG, "  Phase 3: Syncing Historical Data");
-        ESP_LOGI(TAG, "========================================");
+    // ========== PHASE 3: Download historical data ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 3: Syncing Historical Data");
+    ESP_LOGI(TAG, "========================================");
 
-        // Wait for any pending BLE operations to complete before starting history download
-        // This ensures the connection from Phase 1 is fully closed
-        vTaskDelay(pdMS_TO_TICKS(3000));
+    // Wait for any pending BLE operations to complete before starting history download
+    // This ensures the connection from Phase 1 is fully closed
+    vTaskDelay(pdMS_TO_TICKS(3000));
 
-        // Mark sensors as downloading (for internal state tracking)
-        for (int i = 0; i < SENSOR_COUNT; i++) {
-            if (inkbird_ble_is_sensor_enabled(i)) {
-                sensor_data_t *sensor = sensor_data_get(i);
-                if (sensor) {
-                    sensor->downloading = true;
-                }
+    // Mark sensors as downloading (for internal state tracking)
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (inkbird_ble_is_sensor_enabled(i)) {
+            sensor_data_t *sensor = sensor_data_get(i);
+            if (sensor) {
+                sensor->downloading = true;
             }
         }
-
-        // Download history from each sensor
-        for (int i = 0; i < SENSOR_COUNT; i++) {
-            if (inkbird_ble_is_sensor_enabled(i)) {
-                download_sensor_history(i);
-                vTaskDelay(pdMS_TO_TICKS(2000));  // Delay between sensors
-            }
-        }
-
-        // Final display refresh with history charts
-        ESP_LOGI(TAG, "Refreshing display with history charts...");
-        ui_co2_display_update();
-        epd_refresh();
-#endif
-
-        // ========== PHASE 4: Start periodic BLE reading ==========
-        ESP_LOGI(TAG, "");
-        ESP_LOGI(TAG, "========================================");
-        ESP_LOGI(TAG, "  Phase 4: Starting Periodic Updates");
-        ESP_LOGI(TAG, "========================================");
-        inkbird_ble_start();
     }
+
+    // Download history from each sensor
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (inkbird_ble_is_sensor_enabled(i)) {
+            download_sensor_history(i);
+            vTaskDelay(pdMS_TO_TICKS(2000));  // Delay between sensors
+        }
+    }
+
+    // Final display refresh with history charts
+    ESP_LOGI(TAG, "Refreshing display with history charts...");
+    ui_co2_display_update();
+    epd_refresh();
 #endif
+
+    // ========== PHASE 4: Start periodic BLE reading ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 4: Starting Periodic Updates");
+    ESP_LOGI(TAG, "========================================");
+    inkbird_ble_start();
     
     // Create sensor update timer
     s_sensor_timer = xTimerCreate(

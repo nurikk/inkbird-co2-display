@@ -69,8 +69,7 @@ co2_display/
 │   ├── ui/                    # User interface
 │   │   └── ui_co2_display.c/h # 2x2 sensor grid layout
 │   └── data/                  # Data management
-│       ├── sensor_data.c/h    # Sensor readings & history buffers
-│       └── synthetic_data.c/h # Fake data generator for testing
+│       └── sensor_data.c/h    # Sensor readings & history buffers
 ├── platformio.ini             # PlatformIO configuration
 ├── sdkconfig.defaults         # ESP-IDF SDK defaults
 ├── INKBIRD_IAM_T1_PROTOCOL.md # BLE protocol documentation
