@@ -36,27 +36,25 @@
 // Padding inside tiles
 #define TILE_PAD        4
 
+// Chart Y-axis range (fixed scale for consistent visualization)
+#define CHART_MIN_PPM   400
+#define CHART_MAX_PPM   2000
+
 /**
  * @brief Draw a mini chart of CO2 history
+ *
+ * Y-axis is clamped between CHART_MIN_PPM and CHART_MAX_PPM for consistent
+ * visualization across all sensors. Values outside this range are clipped
+ * to the chart boundaries.
  */
 static void draw_chart(int x, int y, int w, int h, const int16_t *data, int count)
 {
     if (count < 2) return;
     
-    // Find min/max for scaling
-    int16_t min_val = data[0];
-    int16_t max_val = data[0];
-    for (int i = 1; i < count; i++) {
-        if (data[i] < min_val) min_val = data[i];
-        if (data[i] > max_val) max_val = data[i];
-    }
-    
-    // Ensure some range
-    if (max_val - min_val < 100) {
-        int16_t mid = (max_val + min_val) / 2;
-        min_val = mid - 50;
-        max_val = mid + 50;
-    }
+    // Use fixed scale for Y-axis (400-2000 ppm)
+    const int16_t min_val = CHART_MIN_PPM;
+    const int16_t max_val = CHART_MAX_PPM;
+    const int16_t range = max_val - min_val;
     
     // Draw border
     gfx_draw_rect(x, y, w, h, true);
@@ -69,8 +67,13 @@ static void draw_chart(int x, int y, int w, int h, const int16_t *data, int coun
     
     int prev_px = 0, prev_py = 0;
     for (int i = 0; i < count; i++) {
+        // Clamp data value to chart range
+        int16_t val = data[i];
+        if (val < min_val) val = min_val;
+        if (val > max_val) val = max_val;
+        
         int px = chart_x + (i * chart_w) / (count - 1);
-        int py = chart_y + chart_h - 1 - ((data[i] - min_val) * (chart_h - 1)) / (max_val - min_val);
+        int py = chart_y + chart_h - 1 - ((val - min_val) * (chart_h - 1)) / range;
         
         if (i > 0) {
             gfx_draw_line(prev_px, prev_py, px, py, true);
