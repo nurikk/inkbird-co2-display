@@ -1,36 +1,135 @@
 # CO2 Display Project
 
+> **Status: 🚧 Work in Progress**
+
 ESP32-based CO2 sensor display with BLE connectivity to Inkbird IAM-T1 sensors.
+
+![CO2 Display Device](doc/device.jpeg)
+
+## Overview
+
+This project creates a standalone air quality monitor that:
+
+- Connects to up to 4 Inkbird IAM-T1 CO2 sensors via Bluetooth Low Energy
+- Displays real-time CO2, temperature, and humidity on a 4.2" e-paper display
+- Downloads and displays historical CO2 trends from sensor memory
+- Shows air quality status indicators (Good / Moderate / Warning / Alert)
+
+## Hardware
+
+### Components
+
+| Component | Model | Notes |
+|-----------|-------|-------|
+| MCU | ESP32-C3-DevKitM-1 | ESP32-C3 with built-in BLE |
+| Display | Waveshare 4.2" B/W E-Paper | 400x300 pixels, SPI interface |
+| Sensors | Inkbird IAM-T1 | BLE CO2/temp/humidity monitors (up to 4) |
+
+### Wiring (ESP32-C3 → E-Paper)
+
+| ESP32-C3 | E-Paper | Function |
+|----------|---------|----------|
+| GPIO 7 | DIN | SPI MOSI |
+| GPIO 6 | CLK | SPI Clock |
+| GPIO 10 | CS | Chip Select |
+| GPIO 1 | DC | Data/Command |
+| GPIO 0 | RST | Reset |
+| GPIO 3 | BUSY | Busy Status |
+| 3.3V | VCC | Power |
+| GND | GND | Ground |
+
+## Features
+
+- **Multi-sensor support** - Monitor up to 4 rooms/locations simultaneously
+- **BLE communication** - Wireless connection to Inkbird IAM-T1 sensors
+- **Real-time readings** - CO2 (ppm), temperature (°C), humidity (%)
+- **History sync** - Downloads stored readings from sensor memory on startup
+- **Trend charts** - Mini CO2 history graphs for each sensor (last 60 readings)
+- **Status indicators** - Visual air quality levels based on CO2 thresholds
+- **Loading screen** - Progress feedback during sensor initialization
+- **Synthetic data mode** - Test UI without physical sensors
+- **Low power display** - E-paper only draws power during refresh
 
 ## Project Structure
 
 ```
 co2_display/
-├── src/                    # ESP32 firmware (C)
-│   ├── main.c             # Main application
-│   ├── ble/               # BLE client for Inkbird sensor
-│   ├── drivers/           # E-paper display drivers
-│   ├── ui/                # UI rendering
-│   └── data/              # Data management
-├── inkbird_client.py      # Python BLE client for data download
-├── test_inkbird.py        # Python BLE connection test
-└── platformio.ini         # Build configuration
+├── src/
+│   ├── main.c                 # Application entry point
+│   ├── ble/                   # BLE client for Inkbird sensors
+│   │   ├── inkbird_ble.c/h    # BLE connection & data parsing
+│   │   └── inkbird_config.h   # Sensor MAC addresses & settings
+│   ├── drivers/               # Hardware drivers
+│   │   ├── epd_driver.c/h     # E-paper display driver (SPI)
+│   │   └── gfx.c/h            # Graphics library (fonts, shapes, charts)
+│   ├── ui/                    # User interface
+│   │   └── ui_co2_display.c/h # 2x2 sensor grid layout
+│   └── data/                  # Data management
+│       ├── sensor_data.c/h    # Sensor readings & history buffers
+│       └── synthetic_data.c/h # Fake data generator for testing
+├── platformio.ini             # PlatformIO configuration
+├── sdkconfig.defaults         # ESP-IDF SDK defaults
+├── INKBIRD_IAM_T1_PROTOCOL.md # BLE protocol documentation
+└── AGENTS.md                  # Development guidelines
 ```
 
-## Hardware
+## Architecture
 
-- **MCU**: ESP32-C3 (ESP32-C3-DevKitM-1)
-- **Display**: E-paper display (SPI)
-- **Sensor**: Inkbird IAM-T1 (BLE)
+### Module Overview
 
-## Firmware (ESP32)
+| Module | Purpose |
+|--------|---------|
+| `main.c` | Startup sequence, FreeRTOS timers, task orchestration |
+| `ble/` | NimBLE-based client for Inkbird sensors (scan, connect, read, history) |
+| `drivers/` | Low-level hardware: SPI e-paper driver + bitmap graphics library |
+| `ui/` | Display layout: 2x2 grid with CO2 values, status, and mini charts |
+| `data/` | Sensor data storage with ring buffers for history |
+
+### Startup Sequence
+
+1. **Initialize hardware** - E-paper display, BLE stack
+2. **Show loading screen** - Immediate visual feedback
+3. **Phase 1: Read current values** - Connect to each sensor, get real-time reading
+4. **Phase 2: Display values** - Refresh e-paper with current data
+5. **Phase 3: Sync history** - Download stored readings from sensor memory
+6. **Phase 4: Periodic updates** - Start background polling task
+
+## Configuration
+
+### Adding Sensors
+
+1. **Discover sensors** - The device scans for Inkbird sensors on first boot. Check serial output for discovered MAC addresses.
+
+2. **Edit configuration** - Update `src/ble/inkbird_config.h`:
+   ```c
+   static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
+       {
+           .mac = {0x62, 0x00, 0xA1, 0x35, 0x94, 0x2B},  // Your sensor MAC
+           .name = "Office",
+           .enabled = true
+       },
+       // ... add more sensors
+   };
+   ```
+
+3. **Rebuild and flash** - `pio run -t upload`
+
+### Testing Without Sensors
+
+Set `USE_SYNTHETIC_DATA` to `true` in `src/main.c` to use generated test data:
+
+```c
+#define USE_SYNTHETIC_DATA  true
+```
+
+## Build & Flash
 
 ### Prerequisites
 
-- [PlatformIO](https://platformio.org/)
-- ESP-IDF v5.5.0 (via PlatformIO)
+- [PlatformIO](https://platformio.org/) (CLI or IDE)
+- USB cable connected to ESP32-C3
 
-### Build & Flash
+### Commands
 
 ```bash
 # Build
@@ -39,158 +138,26 @@ pio run
 # Build and upload
 pio run -t upload
 
+# Monitor serial output (115200 baud)
+pio device monitor
+
 # Build, upload, and monitor
 pio run -t upload && pio device monitor
 
 # Clean build
 pio run -t clean
-```
 
-### Configuration
+# Full clean (including dependencies)
+pio run -t fullclean
 
-```bash
 # Open ESP-IDF menuconfig
 pio run -t menuconfig
 ```
 
-See [AGENTS.md](AGENTS.md) for detailed build instructions and coding guidelines.
-
-## Python Client (Inkbird IAM-T1)
-
-The `inkbird_client.py` script downloads historical data from Inkbird IAM-T1 CO2 sensors via Bluetooth Low Energy (BLE).
-
-### Features
-
-- **Device scanning**: Auto-discover Inkbird IAM-T1 sensors
-- **History download**: Download all stored sensor readings with progress bar
-- **Data visualization**: Interactive charts showing CO2, temperature, and humidity
-- **Time reconstruction**: Calculates timestamps based on recording intervals
-
-### Prerequisites
-
-Python 3.13+ with dependencies:
-
-```bash
-# Install dependencies (using uv)
-uv sync
-
-# Or with pip
-pip install bleak tqdm matplotlib
-```
-
-### Usage
-
-#### Scan for devices
-
-```bash
-python inkbird_client.py --scan
-```
-
-Output:
-```
-Scanning for Inkbird devices (15s)...
-  Found: XX:XX:XX:XX:XX:XX - Ink@IAM-T1 (RSSI: -45)
-
-✓ Found 1 device(s)
-```
-
-#### Download history and display chart
-
-```bash
-python inkbird_client.py
-```
-
-This will:
-1. Scan for Inkbird devices
-2. Connect to the first device found
-3. Download historical data with progress bar
-4. Display statistics
-5. Show interactive chart with CO2, temperature, and humidity
-
-Output:
-```
-Scanning for Inkbird devices (15s)...
-  Found: XX:XX:XX:XX:XX:XX - Ink@IAM-T1 (RSSI: -45)
-
-Using device: XX:XX:XX:XX:XX:XX - Ink@IAM-T1
-Connecting to XX:XX:XX:XX:XX:XX (Ink@IAM-T1)...
-  ✓ Connected
-Pairing with sensor...
-  ✓ Pair command sent
-
-Starting history download...
-Downloading history: 100%|████████| 1440/1440 [00:12<00:00, 120.0 rec/s]
-
-✓ Downloaded 1440 readings
-  Time range: 2026-01-02 14:23:00 to 2026-01-03 14:23:00
-  Recording interval: 10 minutes
-
-============================================================
-STATISTICS
-============================================================
-CO₂:         min= 420 ppm, max=1200 ppm, avg= 650.5 ppm
-Temperature: min=20.5°C,  max=24.3°C,  avg= 22.1°C
-Humidity:    min=35.2%,   max=65.8%,   avg= 48.3%
-
-============================================================
-SAMPLE READINGS
-============================================================
-First reading:
-  2026-01-02 14:23:00: CO2=450ppm, T=21.2°C, H=45.3%, P=1013hPa
-
-Last reading:
-  2026-01-03 14:23:00: CO2=680ppm, T=22.8°C, H=52.1%, P=1015hPa
-
-Displaying chart...
-```
-
-#### Download without chart
-
-```bash
-python inkbird_client.py --no-chart
-```
-
-#### Custom scan timeout
-
-```bash
-python inkbird_client.py --timeout 30
-```
-
-### Chart Features
-
-The generated chart displays:
-
-- **Primary Y-axis (left)**: CO₂ concentration in PPM (blue solid line)
-- **Secondary Y-axis (right)**: 
-  - Temperature in °C (red dashed line)
-  - Relative humidity in % (green dotted line)
-- **X-axis**: Timestamp (auto-formatted based on data range)
-- **Grid**: Semi-transparent grid for easier reading
-- **Legend**: Top-left corner
-
-The chart is interactive:
-- Zoom: Click and drag
-- Pan: Right-click and drag
-- Reset: Home button in toolbar
-- Save: Save button in toolbar
-
-### Protocol Documentation
-
-See [INKBIRD_IAM_T1_PROTOCOL.md](INKBIRD_IAM_T1_PROTOCOL.md) for detailed protocol documentation.
-
 ## Testing
 
-### Python Tests
-
 ```bash
-# Test BLE connection and real-time data
-python test_inkbird.py
-```
-
-### ESP32 Tests
-
-```bash
-# Run all unit tests
+# Run unit tests
 pio test
 
 # Run specific test
@@ -200,42 +167,54 @@ pio test -f test_<name>
 pio check
 ```
 
+See [AGENTS.md](AGENTS.md) for detailed coding guidelines and test conventions.
+
 ## Troubleshooting
 
-### Python Client
+### Build Issues
 
-**No devices found:**
-- Ensure Inkbird IAM-T1 is powered on
-- Check battery level
-- Move closer to sensor (BLE range ~10m)
-- Try increasing scan timeout: `--timeout 30`
-
-**Connection fails:**
-- Reset the sensor (remove and reinsert battery)
-- Disable other Bluetooth connections on your computer
-- Close the Inkbird mobile app if running
-
-**Download hangs:**
-- Wait up to 2 minutes (large datasets take time)
-- Sensor may be in use by another device
-- Try reconnecting
-
-### ESP32 Firmware
-
-**Build fails:**
+**Build fails after config change:**
 ```bash
 pio run -t fullclean
 pio run
 ```
 
+### Upload Issues
+
 **Upload fails:**
 - Check USB connection
 - Hold BOOT button while uploading
-- Check correct USB port in `platformio.ini`
+- Verify correct USB port
 
 **Serial monitor garbled:**
 - Ensure baud rate is 115200
 - Reset ESP32 after upload
+
+### BLE Issues
+
+**No sensors found:**
+- Ensure Inkbird IAM-T1 is powered on (check battery)
+- Move closer to sensor (BLE range ~10m)
+- Check serial log for scan results
+
+**Connection fails:**
+- Reset the sensor (remove and reinsert battery)
+- Close the Inkbird mobile app if running (only one connection allowed)
+- Check MAC address matches in `inkbird_config.h`
+
+**Data not updating:**
+- Sensor sends data every ~1-2 minutes after connection
+- Check `stale` flag timeout in config (default 3 minutes)
+
+### Memory Issues
+
+**Out of memory:**
+- Reduce task stack sizes
+- Check heap usage: `esp_get_free_heap_size()`
+
+## Protocol Documentation
+
+See [INKBIRD_IAM_T1_PROTOCOL.md](INKBIRD_IAM_T1_PROTOCOL.md) for detailed BLE protocol documentation (reverse-engineered from Android APK).
 
 ## License
 
@@ -245,4 +224,4 @@ pio run
 
 - Inkbird IAM-T1 protocol reverse-engineered from Android APK
 - ESP-IDF framework by Espressif
-- BLE communication via Bleak library
+- Waveshare e-paper driver adapted from official Arduino examples
