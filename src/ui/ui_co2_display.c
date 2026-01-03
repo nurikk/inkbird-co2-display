@@ -145,13 +145,20 @@ static void draw_sensor_tile(int tile_x, int tile_y, int tile_w, int tile_h, int
     
     y += 12;
     
-    // Row 4: History chart
-    uint8_t history_count;
-    const int16_t *history = sensor_data_get_co2_history(sensor_idx, &history_count);
-    
+    // Row 4: History chart or downloading message
     int chart_h = tile_h - (y - tile_y) - TILE_PAD;
-    if (chart_h > 10 && history_count > 1) {
-        draw_chart(x, y, w, chart_h, history, history_count);
+    
+    if (sensor->downloading) {
+        // Show downloading message in chart area
+        gfx_draw_rect(x, y, w, chart_h, true);
+        gfx_draw_string(x + w/2 - 40, y + chart_h/2 - 4, "Downloading...", GFX_FONT_SMALL, true);
+    } else {
+        uint8_t history_count;
+        const int16_t *history = sensor_data_get_co2_history(sensor_idx, &history_count);
+        
+        if (chart_h > 10 && history_count > 1) {
+            draw_chart(x, y, w, chart_h, history, history_count);
+        }
     }
 }
 

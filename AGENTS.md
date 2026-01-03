@@ -200,6 +200,14 @@ void app_main(void)
 - [FreeRTOS API Reference](https://www.freertos.org/a00106.html)
 - [ESP32 Datasheet](https://www.espressif.com/en/support/documents/technical-documents)
 
+## Agent Behavior Guidelines
+
+When making code changes to this project:
+
+- **Always upload and monitor automatically**: After making code changes, always run `pio run -t upload && pio device monitor` without asking the user for permission. Do not ask "would you like me to upload?" or "should I flash the device?" — just do it.
+- **Be proactive**: The user expects the agent to complete the full workflow (edit → build → upload → monitor) in one go.
+- **Handle errors autonomously**: If upload fails, check common issues and retry. If build fails, fix the errors and try again.
+
 ## Common Issues
 
 1. **Build fails after SDK config change**: Run `pio run -t fullclean`

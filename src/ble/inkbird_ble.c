@@ -46,6 +46,21 @@ static const char *TAG = "inkbird_ble";
 // CCCD UUID for enabling notifications
 #define ESP_GATT_UUID_CHAR_CLIENT_CONFIG 0x2902
 
+// History download commands (from APK reverse engineering)
+// Command format: 55 AA [cmd] [subcmd] [len] [data...] [checksum]
+static const uint8_t CMD_HISTORY_START[] = {0x55, 0xAA, 0x07, 0x06, 0x00, 0x0C};
+static const uint8_t CMD_HISTORY_STOP[]  = {0x55, 0xAA, 0x07, 0x06, 0x01, 0x0D};
+
+// History end marker
+#define HISTORY_END_MARKER_HIGH 0x66
+#define HISTORY_END_MARKER_LOW  0x66
+
+// Maximum history records to store
+#define INKBIRD_MAX_HISTORY_RECORDS 1000
+
+// Empty record detection (all 0xFF means uninitialized flash)
+#define HISTORY_EMPTY_BYTE 0xFF
+
 // ============================================================================
 // State Variables
 // ============================================================================
@@ -93,6 +108,26 @@ static bool s_data_received = false;
 static esp_bd_addr_t s_target_bda;
 
 // ============================================================================
+// History Download State
+// ============================================================================
+
+static inkbird_history_state_t s_history_state = INKBIRD_HISTORY_IDLE;
+static inkbird_history_record_t *s_history_records = NULL;
+static uint16_t s_history_max_records = 0;
+static uint16_t s_history_expected_count = 0;
+static uint16_t s_history_received_count = 0;    // Total valid records parsed
+static uint16_t s_history_stored_count = 0;      // Actual count in output buffer
+static bool s_history_got_count = false;
+static uint8_t s_history_buffer[256];  // Buffer for accumulating partial data
+static size_t s_history_buffer_len = 0;
+static SemaphoreHandle_t s_history_complete_sem = NULL;
+
+// Circular buffer tracking for getting NEWEST records
+// Sensor sends oldest->newest, so we use circular buffer to keep only the last N
+static uint16_t s_history_write_idx = 0;      // Next write position (circular)
+static bool s_history_buffer_wrapped = false; // True if buffer has wrapped around
+
+// ============================================================================
 // Forward Declarations
 // ============================================================================
 
@@ -100,6 +135,10 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 static void read_task(void *arg);
 static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_idx);
+static void parse_history_notification(const uint8_t *data, size_t len);
+static bool is_empty_record(const uint8_t *data);
+static bool parse_history_record(const uint8_t *data);
+static esp_err_t send_history_command(const uint8_t *cmd, size_t len);
 
 // ============================================================================
 // Public API Implementation
@@ -751,28 +790,44 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 break;
             }
             ESP_LOGI(TAG, "CCCD write success - notifications enabled!");
-            ESP_LOGI(TAG, "Waiting for sensor data (may take a few seconds)...");
+
+            // For history download mode, signal that setup is complete so we can
+            // proceed to send the history command.
+            // For normal mode, we wait for the first notification to arrive.
+            if (s_history_state != INKBIRD_HISTORY_IDLE) {
+                ESP_LOGI(TAG, "History mode: signaling setup complete");
+                xSemaphoreGive(s_read_complete_sem);
+            } else {
+                ESP_LOGI(TAG, "Waiting for sensor data (may take a few seconds)...");
+            }
             break;
 
         case ESP_GATTC_NOTIFY_EVT:
-            ESP_LOGI(TAG, "=== NOTIFICATION RECEIVED ===");
-            ESP_LOGI(TAG, "  handle: %d, len: %d", param->notify.handle, param->notify.value_len);
             if (param->notify.value_len > 0) {
-                ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
+                // Check if we're in history download mode
+                if (s_history_state == INKBIRD_HISTORY_REQUESTING ||
+                    s_history_state == INKBIRD_HISTORY_RECEIVING) {
+                    // History mode - minimal logging to avoid stack overflow
+                    parse_history_notification(param->notify.value, param->notify.value_len);
+                } else {
+                    // Normal mode - log details
+                    ESP_LOGI(TAG, "Notification: handle=%d, len=%d", param->notify.handle, param->notify.value_len);
+                    ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
+                    // Normal real-time data
+                    // Copy data
+                    s_recv_len = param->notify.value_len;
+                    if (s_recv_len > sizeof(s_recv_data)) {
+                        s_recv_len = sizeof(s_recv_data);
+                    }
+                    memcpy(s_recv_data, param->notify.value, s_recv_len);
+                    s_data_received = true;
 
-                // Copy data
-                s_recv_len = param->notify.value_len;
-                if (s_recv_len > sizeof(s_recv_data)) {
-                    s_recv_len = sizeof(s_recv_data);
+                    // Parse data
+                    parse_inkbird_data(s_recv_data, s_recv_len, s_current_sensor_index);
+
+                    // Signal completion
+                    xSemaphoreGive(s_read_complete_sem);
                 }
-                memcpy(s_recv_data, param->notify.value, s_recv_len);
-                s_data_received = true;
-
-                // Parse data
-                parse_inkbird_data(s_recv_data, s_recv_len, s_current_sensor_index);
-
-                // Signal completion
-                xSemaphoreGive(s_read_complete_sem);
             }
             break;
 
@@ -996,4 +1051,441 @@ static void read_task(void *arg)
 
     ESP_LOGI(TAG, "Read task exiting");
     vTaskDelete(NULL);
+}
+
+// ============================================================================
+// History Download Implementation
+// ============================================================================
+
+/**
+ * @brief Send a command to the sensor via FFE9
+ */
+static esp_err_t send_history_command(const uint8_t *cmd, size_t len)
+{
+    if (!s_connected || s_gattc_if == ESP_GATT_IF_NONE || s_cmd_char_handle == 0) {
+        ESP_LOGE(TAG, "Cannot send command: not connected or no command handle");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Sending command to FFE9 (handle=%d):", s_cmd_char_handle);
+    ESP_LOG_BUFFER_HEX(TAG, cmd, len);
+
+    esp_err_t ret = esp_ble_gattc_write_char(
+        s_gattc_if, s_conn_id, s_cmd_char_handle,
+        len, (uint8_t *)cmd,
+        ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Write command failed: %s", esp_err_to_name(ret));
+    }
+
+    return ret;
+}
+
+/**
+ * @brief Check if a 10-byte record is empty (all 0xFF = uninitialized flash)
+ */
+static bool is_empty_record(const uint8_t *data)
+{
+    for (int i = 0; i < 10; i++) {
+        if (data[i] != HISTORY_EMPTY_BYTE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Parse a single 10-byte history record using circular buffer
+ *
+ * Format from APK (IadW1Model.setHistory):
+ * - Bytes 0-1: CO2 (big-endian)
+ * - Byte 2 lower nibble: Unit flag (0=Celsius, 1=Fahrenheit)
+ * - Byte 2 upper nibble or Byte 3 lower: Temperature sign (0=positive, 1=negative)
+ * - Bytes 3-4: Temperature * 10 (big-endian)
+ * - Bytes 5-6: Humidity * 10 (big-endian)
+ * - Bytes 7-8: Pressure/HAP (big-endian)
+ * - Byte 9: Time interval in minutes
+ *
+ * Uses circular buffer to keep the NEWEST records:
+ * - Sensor sends oldest->newest
+ * - We write to circular buffer, overwriting oldest as we go
+ * - When complete, buffer contains the newest N records
+ *
+ * Returns true if record was stored, false if skipped (empty)
+ */
+static bool parse_history_record(const uint8_t *data)
+{
+    // Skip empty records (all 0xFF = uninitialized flash memory)
+    if (is_empty_record(data)) {
+        return false;  // Skipped
+    }
+
+    if (s_history_records == NULL || s_history_max_records == 0) {
+        return false;
+    }
+
+    // Parse CO2 first to validate
+    uint16_t co2_ppm = ((uint16_t)data[0] << 8) | data[1];
+    
+    // Skip records with invalid CO2 values (sanity check)
+    // Valid range: 200-10000 ppm (outdoor is ~400, very poor indoor can reach 5000+)
+    if (co2_ppm < 200 || co2_ppm > 10000) {
+        return false;  // Invalid record, skip
+    }
+
+    // Write to current position in circular buffer
+    inkbird_history_record_t *rec = &s_history_records[s_history_write_idx];
+
+    // CO2: bytes 0-1 (big-endian)
+    rec->co2_ppm = co2_ppm;
+
+    // Byte 2 structure (from INKBIRD_IAM_T1_PROTOCOL.md section 6.3):
+    // In hex string: position [4] = TempUnit, position [5] = TempSign
+    // In raw bytes: upper nibble = TempUnit, lower nibble = TempSign
+    rec->is_fahrenheit = (data[2] & 0xF0) != 0;  // Upper nibble = TempUnit
+    bool is_negative = (data[2] & 0x0F) != 0;    // Lower nibble = TempSign
+
+    // Temperature: bytes 3-4 (big-endian) * 0.1
+    uint16_t temp_raw = ((uint16_t)data[3] << 8) | data[4];
+    rec->temperature = is_negative ? -(int16_t)temp_raw : (int16_t)temp_raw;
+
+    // Humidity: bytes 5-6 (big-endian) * 0.1
+    rec->humidity = ((uint16_t)data[5] << 8) | data[6];
+
+    // Pressure: bytes 7-8 (big-endian)
+    rec->pressure = ((uint16_t)data[7] << 8) | data[8];
+
+    // Interval: byte 9
+    rec->interval_mins = data[9];
+
+    s_history_received_count++;  // Total valid records seen
+
+    ESP_LOGD(TAG, "History[%d->%d]: CO2=%u, T=%d, H=%u, P=%u, Int=%u",
+             s_history_received_count, s_history_write_idx, rec->co2_ppm,
+             rec->temperature, rec->humidity, rec->pressure, rec->interval_mins);
+
+    // Advance write index (circular)
+    s_history_write_idx++;
+    if (s_history_write_idx >= s_history_max_records) {
+        s_history_write_idx = 0;
+        s_history_buffer_wrapped = true;
+    }
+
+    return true;  // Record stored
+}
+
+/**
+ * @brief Parse history notification data
+ *
+ * Protocol (per INKBIRD_IAM_T1_PROTOCOL.md section 6):
+ * 1. First packet: 2 bytes = record count (big-endian)
+ * 2. Data packets: 10 bytes per record (raw bytes, fragmented across BLE packets)
+ * 3. End marker: 0x66 0x66
+ */
+static void parse_history_notification(const uint8_t *data, size_t len)
+{
+    // Log ALL incoming packets during history download for debugging
+    ESP_LOGI(TAG, "History RX: %d bytes, first 4: %02X %02X %02X %02X", 
+             (int)len, data[0], len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
+
+    // Check for end marker (0x6666) anywhere in packet
+    // End marker can be at start OR after partial record data
+    for (size_t i = 0; i + 1 < len; i++) {
+        if (data[i] == HISTORY_END_MARKER_HIGH && data[i + 1] == HISTORY_END_MARKER_LOW) {
+            ESP_LOGI(TAG, "History end marker in packet at offset %d", (int)i);
+            // Add data before the end marker to buffer for processing
+            if (i > 0 && s_history_buffer_len + i < sizeof(s_history_buffer)) {
+                memcpy(s_history_buffer + s_history_buffer_len, data, i);
+                s_history_buffer_len += i;
+            }
+            s_history_state = INKBIRD_HISTORY_COMPLETE;
+            if (s_history_complete_sem != NULL) {
+                xSemaphoreGive(s_history_complete_sem);
+            }
+            return;
+        }
+    }
+
+    // First response should be record count (2 bytes, big-endian)
+    // Per INKBIRD_IAM_T1_PROTOCOL.md section 6.2: "4 hex chars (2 bytes)"
+    if (s_history_state == INKBIRD_HISTORY_REQUESTING && !s_history_got_count) {
+        if (len >= 2) {
+            // Count is 2 bytes big-endian
+            s_history_expected_count = ((uint16_t)data[0] << 8) | data[1];
+            s_history_got_count = true;
+            s_history_state = INKBIRD_HISTORY_RECEIVING;
+            ESP_LOGI(TAG, ">>> History record count: %u (raw: 0x%02X%02X) <<<", 
+                     s_history_expected_count, data[0], data[1]);
+
+            // Process any remaining data in this packet
+            if (len > 2) {
+                size_t remaining = len - 2;
+                if (remaining + s_history_buffer_len < sizeof(s_history_buffer)) {
+                    memcpy(s_history_buffer + s_history_buffer_len, data + 2, remaining);
+                    s_history_buffer_len += remaining;
+                }
+            }
+        }
+        return;
+    }
+
+    // Receiving state: accumulate data and parse records
+    if (s_history_state == INKBIRD_HISTORY_RECEIVING) {
+        // Add new data to buffer
+        if (len + s_history_buffer_len < sizeof(s_history_buffer)) {
+            memcpy(s_history_buffer + s_history_buffer_len, data, len);
+            s_history_buffer_len += len;
+        } else {
+            ESP_LOGW(TAG, "History buffer overflow, discarding data");
+        }
+
+        // Process complete 10-byte records from buffer
+        while (s_history_buffer_len >= 10) {
+            // Check for end marker in buffer
+            if (s_history_buffer[0] == HISTORY_END_MARKER_HIGH &&
+                s_history_buffer[1] == HISTORY_END_MARKER_LOW) {
+                ESP_LOGI(TAG, "History end marker found at buffer start");
+                s_history_state = INKBIRD_HISTORY_COMPLETE;
+                if (s_history_complete_sem != NULL) {
+                    xSemaphoreGive(s_history_complete_sem);
+                }
+                return;
+            }
+
+            // Parse one record (skips empty records, uses circular buffer)
+            parse_history_record(s_history_buffer);
+
+            // Shift buffer
+            memmove(s_history_buffer, s_history_buffer + 10, s_history_buffer_len - 10);
+            s_history_buffer_len -= 10;
+
+            // Log progress periodically (every 5000 valid records)
+            if (s_history_received_count > 0 && s_history_received_count % 5000 == 0) {
+                ESP_LOGI(TAG, "Progress: %u valid records received...", s_history_received_count);
+            }
+        }
+
+        // Check for end marker in remaining buffer (less than 10 bytes)
+        // End marker can appear after last record data: e.g., "E3 66 66" where E3 is 
+        // last byte of record and 66 66 is end marker
+        if (s_history_buffer_len >= 2) {
+            // Scan buffer for end marker anywhere
+            for (size_t i = 0; i <= s_history_buffer_len - 2; i++) {
+                if (s_history_buffer[i] == HISTORY_END_MARKER_HIGH &&
+                    s_history_buffer[i + 1] == HISTORY_END_MARKER_LOW) {
+                    ESP_LOGI(TAG, "History end marker found at offset %d in buffer", (int)i);
+                    s_history_state = INKBIRD_HISTORY_COMPLETE;
+                    if (s_history_complete_sem != NULL) {
+                        xSemaphoreGive(s_history_complete_sem);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// History Public API
+// ============================================================================
+
+esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
+                                        inkbird_history_record_t *records,
+                                        uint16_t max_records,
+                                        uint16_t *out_count)
+{
+    if (!s_ble_initialized) {
+        ESP_LOGE(TAG, "BLE not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (records == NULL || max_records == 0 || out_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (sensor_idx >= INKBIRD_SENSOR_COUNT || !INKBIRD_SENSORS[sensor_idx].enabled) {
+        ESP_LOGE(TAG, "Invalid or disabled sensor index: %d", sensor_idx);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Create completion semaphore if needed
+    if (s_history_complete_sem == NULL) {
+        s_history_complete_sem = xSemaphoreCreateBinary();
+        if (s_history_complete_sem == NULL) {
+            ESP_LOGE(TAG, "Failed to create history semaphore");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    // Reset history state - set to REQUESTING before connect so CCCD handler knows
+    s_history_state = INKBIRD_HISTORY_REQUESTING;
+    s_history_records = records;
+    s_history_max_records = max_records;
+    s_history_expected_count = 0;
+    s_history_received_count = 0;
+    s_history_stored_count = 0;
+    s_history_got_count = false;
+    s_history_buffer_len = 0;
+    s_history_write_idx = 0;
+    s_history_buffer_wrapped = false;
+    *out_count = 0;
+
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Starting History Download");
+    ESP_LOGI(TAG, "  Sensor: %d (%s)", sensor_idx, INKBIRD_SENSORS[sensor_idx].name);
+    ESP_LOGI(TAG, "  Max records: %u", max_records);
+    ESP_LOGI(TAG, "========================================");
+
+    // Connect to sensor
+    s_current_sensor_index = sensor_idx;
+    memcpy(s_target_bda, INKBIRD_SENSORS[sensor_idx].mac, 6);
+    s_data_received = false;
+
+    ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",
+             s_target_bda[0], s_target_bda[1], s_target_bda[2],
+             s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+
+    esp_err_t ret = esp_ble_gattc_open(
+        s_gattc_if, s_target_bda,
+        BLE_ADDR_TYPE_PUBLIC, true);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Public addr failed, trying random...");
+        ret = esp_ble_gattc_open(
+            s_gattc_if, s_target_bda,
+            BLE_ADDR_TYPE_RANDOM, true);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Connection failed: %s", esp_err_to_name(ret));
+        s_history_state = INKBIRD_HISTORY_ERROR;
+        return ret;
+    }
+
+    // Wait for connection and notification setup
+    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(30000));
+    if (got_sem != pdTRUE || !s_connected) {
+        ESP_LOGE(TAG, "Connection timeout or failed");
+        s_history_state = INKBIRD_HISTORY_ERROR;
+        if (s_connected) {
+            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Small delay after notification setup
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Send history start command
+    ESP_LOGI(TAG, "Sending history start command...");
+
+    ret = send_history_command(CMD_HISTORY_START, sizeof(CMD_HISTORY_START));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send history command");
+        s_history_state = INKBIRD_HISTORY_ERROR;
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        return ret;
+    }
+
+    // Wait for history download to complete (timeout: 5 minutes for large datasets)
+    ESP_LOGI(TAG, "Waiting for history data (timeout: 300s)...");
+    got_sem = xSemaphoreTake(s_history_complete_sem, pdMS_TO_TICKS(300000));
+
+    if (got_sem != pdTRUE) {
+        ESP_LOGW(TAG, "History download timeout");
+        s_history_state = INKBIRD_HISTORY_ERROR;
+    }
+
+    // Disconnect
+    ESP_LOGI(TAG, "Disconnecting...");
+    if (s_connected) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    // Calculate actual stored count and reorder circular buffer
+    // The circular buffer now contains the NEWEST records, but they may be
+    // out of order if the buffer wrapped.
+    if (s_history_buffer_wrapped) {
+        // Buffer wrapped - records are out of order
+        // Current layout: [newest...] [oldest in buffer...]
+        //                  ^write_idx
+        // We need to reorder to: [oldest in buffer...] [newest...]
+        s_history_stored_count = s_history_max_records;
+
+        ESP_LOGI(TAG, "Reordering circular buffer (wrapped at idx %u)...", s_history_write_idx);
+
+        // Allocate temp buffer for reordering
+        inkbird_history_record_t *temp = pvPortMalloc(sizeof(inkbird_history_record_t) * s_history_max_records);
+        if (temp != NULL) {
+            // Copy from write_idx to end (these are the older records in buffer)
+            uint16_t first_part = s_history_max_records - s_history_write_idx;
+            memcpy(temp, &records[s_history_write_idx], sizeof(inkbird_history_record_t) * first_part);
+
+            // Copy from start to write_idx (these are the newer records)
+            memcpy(&temp[first_part], records, sizeof(inkbird_history_record_t) * s_history_write_idx);
+
+            // Copy back to original buffer
+            memcpy(records, temp, sizeof(inkbird_history_record_t) * s_history_max_records);
+
+            vPortFree(temp);
+            ESP_LOGI(TAG, "Buffer reordered: oldest at [0], newest at [%u]", s_history_max_records - 1);
+        } else {
+            ESP_LOGW(TAG, "Failed to allocate temp buffer for reordering");
+            // Records will be out of order but still valid
+        }
+    } else {
+        // Buffer didn't wrap - records are already in order (oldest to newest)
+        s_history_stored_count = s_history_write_idx;
+        ESP_LOGI(TAG, "Buffer did not wrap, %u records in order", s_history_stored_count);
+    }
+
+    // Report results
+    *out_count = s_history_stored_count;
+
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  History Download Complete");
+    ESP_LOGI(TAG, "  Total records from sensor: %u", s_history_expected_count);
+    ESP_LOGI(TAG, "  Valid records received: %u", s_history_received_count);
+    ESP_LOGI(TAG, "  Records in output buffer: %u (NEWEST)", s_history_stored_count);
+    ESP_LOGI(TAG, "  State: %d", s_history_state);
+    ESP_LOGI(TAG, "========================================");
+
+    // Determine success and reset state
+    bool success = (s_history_state == INKBIRD_HISTORY_COMPLETE ||
+        (s_history_stored_count > 0 && s_history_received_count > s_history_expected_count * 9 / 10));
+    
+    // Reset state to IDLE so normal BLE reading works
+    s_history_state = INKBIRD_HISTORY_IDLE;
+    s_history_records = NULL;
+    
+    if (success) {
+        ESP_LOGI(TAG, "History download considered successful");
+        return ESP_OK;
+    } else {
+        return ESP_ERR_TIMEOUT;
+    }
+}
+
+esp_err_t inkbird_ble_cancel_history(void)
+{
+    if (s_history_state == INKBIRD_HISTORY_IDLE) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Cancelling history download...");
+
+    esp_err_t ret = send_history_command(CMD_HISTORY_STOP, sizeof(CMD_HISTORY_STOP));
+
+    s_history_state = INKBIRD_HISTORY_IDLE;
+    s_history_records = NULL;
+    s_history_buffer_len = 0;
+
+    return ret;
+}
+
+inkbird_history_state_t inkbird_ble_get_history_state(void)
+{
+    return s_history_state;
 }

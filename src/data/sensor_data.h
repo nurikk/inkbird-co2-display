@@ -59,6 +59,7 @@ typedef struct {
     uint8_t history_head;                       // Ring buffer head index
     uint8_t history_count;                      // Number of valid history entries
     bool connected;                             // Sensor connection status
+    bool downloading;                           // True while downloading history
 } sensor_data_t;
 
 /**
@@ -83,6 +84,17 @@ sensor_data_t *sensor_data_get(uint8_t index);
  * @param reading New sensor reading
  */
 void sensor_data_update(uint8_t index, const sensor_reading_t *reading);
+
+/**
+ * @brief Add CO2 value to history only
+ *
+ * Adds a CO2 reading to the history buffer without updating the current reading.
+ * Use this for loading historical data from sensor memory.
+ *
+ * @param index Sensor index (0-3)
+ * @param co2_ppm CO2 value in ppm
+ */
+void sensor_data_add_history(uint8_t index, uint16_t co2_ppm);
 
 /**
  * @brief Get CO2 status level

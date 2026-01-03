@@ -33,12 +33,88 @@ static const char *TAG = "main";
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
 #define DISPLAY_REFRESH_MS      60000   // E-paper refresh interval (1 minute)
 
+// History download configuration
+// Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
+#define DOWNLOAD_HISTORY_ON_STARTUP  true  // Set to false to skip history download
+
 // FreeRTOS timer handles
 static TimerHandle_t s_sensor_timer = NULL;
 static TimerHandle_t s_refresh_timer = NULL;
 
 // Flag to trigger display refresh
 static volatile bool s_do_refresh = false;
+
+// History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
+static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
+
+/**
+ * @brief Download historical data from a sensor
+ */
+static void download_sensor_history(uint8_t sensor_idx)
+{
+    if (!inkbird_ble_is_sensor_enabled(sensor_idx)) {
+        return;
+    }
+    
+    sensor_data_t *sensor = sensor_data_get(sensor_idx);
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Downloading History from Sensor %d", sensor_idx);
+    ESP_LOGI(TAG, "  Name: %s", inkbird_ble_get_sensor_name(sensor_idx));
+    ESP_LOGI(TAG, "========================================");
+
+    uint16_t count = 0;
+    esp_err_t ret = inkbird_ble_download_history(
+        sensor_idx,
+        s_history_records,
+        SENSOR_HISTORY_SIZE,
+        &count
+    );
+    
+    // Clear downloading flag
+    if (sensor) {
+        sensor->downloading = false;
+    }
+
+    if (ret == ESP_OK && count > 0) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, ">>> History download SUCCESS: %u records <<<", count);
+        
+        // Feed history data into sensor_data module for chart display
+        ESP_LOGI(TAG, "Adding %u records to chart", count);
+        
+        // Log first and last records
+        ESP_LOGI(TAG, "  First: CO2=%u ppm, T=%.1f C",
+                 s_history_records[0].co2_ppm,
+                 s_history_records[0].temperature / 10.0f);
+        if (count > 1) {
+            ESP_LOGI(TAG, "  Last:  CO2=%u ppm, T=%.1f C",
+                     s_history_records[count-1].co2_ppm,
+                     s_history_records[count-1].temperature / 10.0f);
+        }
+        
+        // Feed all records to chart history only (don't update current reading)
+        // Records are already in chronological order (oldest first)
+        for (int i = 0; i < count; i++) {
+            inkbird_history_record_t *hist = &s_history_records[i];
+            // Only add valid CO2 readings to history
+            if (hist->co2_ppm > 0 && hist->co2_ppm < 10000) {
+                sensor_data_add_history(sensor_idx, hist->co2_ppm);
+            }
+        }
+        
+        // Mark sensor as connected since we got data
+        if (sensor) {
+            sensor->connected = true;
+        }
+    } else {
+        ESP_LOGW(TAG, ">>> History download FAILED: %s <<<", esp_err_to_name(ret));
+    }
+
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "");
+}
 
 /**
  * @brief Sensor data update timer callback
@@ -162,19 +238,52 @@ void app_main(void)
         synthetic_data_init();
         synthetic_data_prefill_history(SENSOR_HISTORY_SIZE);
     } else {
-        // Run discovery to find sensors (comment out after MACs are configured)
-        ESP_LOGI(TAG, "Running sensor discovery...");
-        inkbird_ble_discover();
+        // Initialize UI
+        ESP_LOGI(TAG, "Initializing UI...");
+        ui_co2_display_init();
         
-        // Start BLE reading cycle
+#if DOWNLOAD_HISTORY_ON_STARTUP
+        // Mark sensors as downloading
+        for (int i = 0; i < SENSOR_COUNT; i++) {
+            if (inkbird_ble_is_sensor_enabled(i)) {
+                sensor_data_t *sensor = sensor_data_get(i);
+                if (sensor) {
+                    sensor->downloading = true;
+                }
+            }
+        }
+        
+        // Show initial display with "Downloading..." on charts
+        ESP_LOGI(TAG, "Showing initial display (downloading)...");
+        ui_co2_display_update();
+        epd_refresh();
+        
+        // Download history from sensors (before starting BLE reading)
+        ESP_LOGI(TAG, "Downloading historical data from sensors...");
+        for (int i = 0; i < SENSOR_COUNT; i++) {
+            if (inkbird_ble_is_sensor_enabled(i)) {
+                download_sensor_history(i);
+                vTaskDelay(pdMS_TO_TICKS(2000));  // Delay between sensors
+            }
+        }
+        
+        // Refresh display with chart data
+        ESP_LOGI(TAG, "Refreshing display with history...");
+        ui_co2_display_update();
+        epd_refresh();
+#endif
+        
+        // NOW start BLE reading cycle (after history download is complete)
         ESP_LOGI(TAG, "Starting BLE sensor reading...");
         inkbird_ble_start();
     }
 #endif
     
-    // Initialize UI
+#if USE_SYNTHETIC_DATA
+    // Initialize UI for synthetic mode
     ESP_LOGI(TAG, "Initializing UI...");
     ui_co2_display_init();
+#endif
     
     // Create sensor update timer
     s_sensor_timer = xTimerCreate(

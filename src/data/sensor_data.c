@@ -59,6 +59,23 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
     }
 }
 
+void sensor_data_add_history(uint8_t index, uint16_t co2_ppm)
+{
+    if (index >= SENSOR_COUNT) {
+        return;
+    }
+    
+    sensor_data_t *sensor = &s_sensors[index];
+    
+    // Add to history ring buffer only (don't update current reading)
+    sensor->co2_history[sensor->history_head] = (int16_t)co2_ppm;
+    sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
+    
+    if (sensor->history_count < SENSOR_HISTORY_SIZE) {
+        sensor->history_count++;
+    }
+}
+
 co2_status_t sensor_data_get_co2_status(uint16_t co2_ppm)
 {
     if (co2_ppm < CO2_LEVEL_GOOD) {

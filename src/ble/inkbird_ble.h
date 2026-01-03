@@ -43,6 +43,43 @@ typedef struct {
 } inkbird_reading_t;
 
 /**
+ * @brief Historical data record from sensor memory
+ *
+ * The sensor stores readings at configurable intervals (typically 10 minutes).
+ * Each record contains environmental data at that point in time.
+ */
+typedef struct {
+    uint16_t co2_ppm;       // CO2 concentration in ppm
+    int16_t  temperature;   // Temperature in 0.1°C units
+    uint16_t humidity;      // Relative humidity in 0.1% units
+    uint16_t pressure;      // Atmospheric pressure in hPa
+    uint8_t  interval_mins; // Recording interval in minutes
+    bool     is_fahrenheit; // true if sensor was set to Fahrenheit
+} inkbird_history_record_t;
+
+/**
+ * @brief History download state
+ */
+typedef enum {
+    INKBIRD_HISTORY_IDLE = 0,       // Not downloading
+    INKBIRD_HISTORY_REQUESTING,     // Command sent, waiting for count
+    INKBIRD_HISTORY_RECEIVING,      // Receiving data records
+    INKBIRD_HISTORY_COMPLETE,       // Download finished successfully
+    INKBIRD_HISTORY_ERROR,          // Download failed
+} inkbird_history_state_t;
+
+/**
+ * @brief History download result
+ */
+typedef struct {
+    inkbird_history_state_t state;
+    uint16_t expected_count;        // Number of records expected
+    uint16_t received_count;        // Number of records received
+    inkbird_history_record_t *records;  // Pointer to record array (caller-allocated)
+    uint16_t max_records;           // Size of records array
+} inkbird_history_result_t;
+
+/**
  * @brief Discovered sensor information (from BLE scan)
  */
 typedef struct {
@@ -102,6 +139,39 @@ inkbird_reading_t inkbird_ble_get_reading(uint8_t index);
  * @return true if sensor is connected, false otherwise
  */
 bool inkbird_ble_is_connected(uint8_t index);
+
+/**
+ * @brief Request historical data download from sensor
+ *
+ * Initiates a history download from the specified sensor.
+ * This is a blocking call that connects, downloads history, then disconnects.
+ *
+ * @param sensor_idx Sensor index (0 to INKBIRD_SENSOR_COUNT-1)
+ * @param records Pre-allocated array to store history records
+ * @param max_records Maximum number of records the array can hold
+ * @param out_count Pointer to store actual number of records received
+ * @return ESP_OK if download succeeded, error code otherwise
+ */
+esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
+                                        inkbird_history_record_t *records,
+                                        uint16_t max_records,
+                                        uint16_t *out_count);
+
+/**
+ * @brief Cancel ongoing history download
+ *
+ * Sends cancel command to sensor and stops history download.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t inkbird_ble_cancel_history(void);
+
+/**
+ * @brief Get current history download state
+ *
+ * @return Current history download state
+ */
+inkbird_history_state_t inkbird_ble_get_history_state(void);
 
 /**
  * @brief Start discovery scan for Inkbird sensors
