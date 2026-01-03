@@ -15,6 +15,10 @@ This project creates a standalone air quality monitor that:
 - Downloads and displays historical CO2 trends from sensor memory
 - Shows air quality status indicators (Good / Moderate / Warning / Alert)
 
+The Inkbird IAM-T1 sensors store readings in internal memory at configurable intervals (typically 10 minutes). On startup, the firmware connects to each sensor and downloads the stored history, allowing the display to show CO2 trends immediately without waiting for new readings to accumulate.
+
+Sensor configuration (MAC addresses and display names) is defined in `src/ble/inkbird_config.h`. Each sensor slot can be enabled/disabled independently, and custom names (e.g., "Office", "Bedroom") are shown on the display.
+
 ## Hardware
 
 ### Components
