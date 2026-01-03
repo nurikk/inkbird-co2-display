@@ -1185,8 +1185,8 @@ static bool parse_history_record(const uint8_t *data)
  */
 static void parse_history_notification(const uint8_t *data, size_t len)
 {
-    // Log ALL incoming packets during history download for debugging
-    ESP_LOGI(TAG, "History RX: %d bytes, first 4: %02X %02X %02X %02X", 
+    // Debug logging for history packets (use ESP_LOGD in production)
+    ESP_LOGD(TAG, "History RX: %d bytes, first 4: %02X %02X %02X %02X", 
              (int)len, data[0], len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
     // Check for end marker (0x6666) anywhere in packet
