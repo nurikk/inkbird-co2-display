@@ -32,7 +32,7 @@ co2_display/
 | `pio run -t upload` | Build and upload to device |
 | `pio run -t clean` | Clean build artifacts |
 | `pio run -t fullclean` | Full clean including dependencies |
-| `pio device monitor` | Open serial monitor (115200 baud) |
+| `pio device monitor` | Open serial monitor (115200 baud). Requires PTY to run |
 | `pio run -t upload && pio device monitor` | Build, upload, and monitor |
 | `pio run -t menuconfig` | Open ESP-IDF configuration menu |
 
