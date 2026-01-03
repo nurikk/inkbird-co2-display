@@ -142,11 +142,11 @@ static void draw_sensor_tile(int tile_x, int tile_y, int tile_w, int tile_h, int
         int hum_whole = sensor->current.humidity / 10;
         snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
         
-        gfx_draw_string(x, y, temp_str, GFX_FONT_SMALL, true);
-        gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, hum_str, GFX_FONT_SMALL, true);
+        gfx_draw_string(x, y, temp_str, GFX_FONT_MEDIUM, true);
+        gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, hum_str, GFX_FONT_MEDIUM, true);
     }
     
-    y += 12;
+    y += 18;
     
     // Row 4: History chart or downloading message
     int chart_h = tile_h - (y - tile_y) - TILE_PAD;
