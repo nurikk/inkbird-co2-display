@@ -1,6 +1,6 @@
 /**
  * @file ui_co2_display.c
- * @brief Main CO2 display UI with 2x2 sensor grid
+ * @brief CO2 display UI using direct framebuffer rendering
  *
  * Layout (400x300 pixels):
  * ┌───────────────────┬───────────────────┐
@@ -12,107 +12,168 @@
  * └───────────────────┴───────────────────┘
  */
 
+#include <stdio.h>
+#include <string.h>
+
 #include "ui_co2_display.h"
-#include "ui_sensor_tile.h"
-#include "ui_styles.h"
 #include "sensor_data.h"
 #include "epd_driver.h"
+#include "gfx.h"
 
 // Display dimensions
-#define DISPLAY_WIDTH   400
-#define DISPLAY_HEIGHT  300
+#define DISPLAY_WIDTH   EPD_WIDTH
+#define DISPLAY_HEIGHT  EPD_HEIGHT
 
 // Grid configuration
 #define GRID_COLS       2
 #define GRID_ROWS       2
 #define GRID_GAP        2
 
-// Tile dimensions (accounting for gap)
-#define TILE_WIDTH      ((DISPLAY_WIDTH - GRID_GAP) / GRID_COLS)
-#define TILE_HEIGHT     ((DISPLAY_HEIGHT - GRID_GAP) / GRID_ROWS)
+// Tile dimensions
+#define TILE_WIDTH      ((DISPLAY_WIDTH - GRID_GAP) / GRID_COLS)   // 199
+#define TILE_HEIGHT     ((DISPLAY_HEIGHT - GRID_GAP) / GRID_ROWS)  // 149
 
-// Static storage for tiles
-static ui_sensor_tile_t *s_tiles[SENSOR_COUNT];
-static lv_obj_t *s_main_container = NULL;
-static bool s_needs_refresh = false;
+// Padding inside tiles
+#define TILE_PAD        4
 
-// Grid column and row descriptors
-static int32_t s_col_dsc[] = { TILE_WIDTH, TILE_WIDTH, LV_GRID_TEMPLATE_LAST };
-static int32_t s_row_dsc[] = { TILE_HEIGHT, TILE_HEIGHT, LV_GRID_TEMPLATE_LAST };
+/**
+ * @brief Draw a mini chart of CO2 history
+ */
+static void draw_chart(int x, int y, int w, int h, const int16_t *data, int count)
+{
+    if (count < 2) return;
+    
+    // Find min/max for scaling
+    int16_t min_val = data[0];
+    int16_t max_val = data[0];
+    for (int i = 1; i < count; i++) {
+        if (data[i] < min_val) min_val = data[i];
+        if (data[i] > max_val) max_val = data[i];
+    }
+    
+    // Ensure some range
+    if (max_val - min_val < 100) {
+        int16_t mid = (max_val + min_val) / 2;
+        min_val = mid - 50;
+        max_val = mid + 50;
+    }
+    
+    // Draw border
+    gfx_draw_rect(x, y, w, h, true);
+    
+    // Draw data points as connected lines
+    int chart_x = x + 1;
+    int chart_y = y + 1;
+    int chart_w = w - 2;
+    int chart_h = h - 2;
+    
+    int prev_px = 0, prev_py = 0;
+    for (int i = 0; i < count; i++) {
+        int px = chart_x + (i * chart_w) / (count - 1);
+        int py = chart_y + chart_h - 1 - ((data[i] - min_val) * (chart_h - 1)) / (max_val - min_val);
+        
+        if (i > 0) {
+            gfx_draw_line(prev_px, prev_py, px, py, true);
+        }
+        prev_px = px;
+        prev_py = py;
+    }
+}
+
+/**
+ * @brief Draw a single sensor tile
+ */
+static void draw_sensor_tile(int tile_x, int tile_y, int tile_w, int tile_h, int sensor_idx)
+{
+    sensor_data_t *sensor = sensor_data_get(sensor_idx);
+    if (sensor == NULL) return;
+    
+    // Draw tile border
+    gfx_draw_rect(tile_x, tile_y, tile_w, tile_h, true);
+    
+    int x = tile_x + TILE_PAD;
+    int y = tile_y + TILE_PAD;
+    int w = tile_w - TILE_PAD * 2;
+    
+    // Row 1: Sensor name and status
+    gfx_draw_string(x, y, sensor->name, GFX_FONT_SMALL, true);
+    
+    // Status indicator on right
+    co2_status_t status = sensor_data_get_co2_status(sensor->current.co2_ppm);
+    const char *status_text = sensor_data_get_status_text(status);
+    gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, status_text, GFX_FONT_SMALL, true);
+    
+    y += 12;
+    
+    // Row 2: CO2 value (large)
+    if (sensor->connected) {
+        char co2_str[16];
+        snprintf(co2_str, sizeof(co2_str), "%d", sensor->current.co2_ppm);
+        
+        // Center the CO2 value
+        int co2_width = gfx_string_width(co2_str, GFX_FONT_XLARGE);
+        int unit_width = gfx_string_width(" ppm", GFX_FONT_SMALL);
+        int total_width = co2_width + unit_width;
+        int start_x = x + (w - total_width) / 2;
+        
+        gfx_draw_string(start_x, y, co2_str, GFX_FONT_XLARGE, true);
+        gfx_draw_string(start_x + co2_width, y + 20, " ppm", GFX_FONT_SMALL, true);
+    } else {
+        gfx_draw_string(x + w/2 - 16, y + 10, "----", GFX_FONT_MEDIUM, true);
+    }
+    
+    y += 38;
+    
+    // Row 3: Temperature and humidity
+    if (sensor->connected) {
+        char temp_str[24];
+        char hum_str[24];
+        
+        // Temperature (value is in 0.1C units)
+        int temp_whole = sensor->current.temperature / 10;
+        int temp_frac = sensor->current.temperature % 10;
+        if (temp_frac < 0) temp_frac = -temp_frac;
+        snprintf(temp_str, sizeof(temp_str), "%d.%dC", temp_whole, temp_frac);
+        
+        // Humidity (value is in 0.1% units)  
+        int hum_whole = sensor->current.humidity / 10;
+        snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
+        
+        gfx_draw_string(x, y, temp_str, GFX_FONT_SMALL, true);
+        gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, hum_str, GFX_FONT_SMALL, true);
+    }
+    
+    y += 12;
+    
+    // Row 4: History chart
+    uint8_t history_count;
+    const int16_t *history = sensor_data_get_co2_history(sensor_idx, &history_count);
+    
+    int chart_h = tile_h - (y - tile_y) - TILE_PAD;
+    if (chart_h > 10 && history_count > 1) {
+        draw_chart(x, y, w, chart_h, history, history_count);
+    }
+}
 
 void ui_co2_display_init(void)
 {
-    // Initialize styles first
-    ui_styles_init();
-    
-    // Get the active screen
-    lv_obj_t *screen = lv_screen_active();
-    
-    // Set screen background to white and remove any default padding
-    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(screen, 0, 0);
-    lv_obj_set_style_border_width(screen, 0, 0);
-    
-    // Create main container with grid layout
-    s_main_container = lv_obj_create(screen);
-    lv_obj_set_size(s_main_container, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    lv_obj_set_pos(s_main_container, 0, 0);
-    lv_obj_set_style_bg_color(s_main_container, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(s_main_container, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_main_container, 0, 0);
-    lv_obj_set_style_pad_all(s_main_container, 0, 0);
-    lv_obj_set_style_pad_gap(s_main_container, GRID_GAP, 0);
-    lv_obj_clear_flag(s_main_container, LV_OBJ_FLAG_SCROLLABLE);
-    
-    // Set up grid layout
-    lv_obj_set_layout(s_main_container, LV_LAYOUT_GRID);
-    lv_obj_set_style_grid_column_dsc_array(s_main_container, s_col_dsc, 0);
-    lv_obj_set_style_grid_row_dsc_array(s_main_container, s_row_dsc, 0);
-    
-    // Create sensor tiles in 2x2 grid
-    // Sensor indices map to grid positions:
-    // [0] [1]
-    // [2] [3]
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        int col = i % GRID_COLS;
-        int row = i / GRID_COLS;
-        
-        // Create tile
-        s_tiles[i] = ui_sensor_tile_create(s_main_container, i);
-        
-        if (s_tiles[i] != NULL) {
-            // Set tile size
-            ui_sensor_tile_set_size(s_tiles[i], TILE_WIDTH, TILE_HEIGHT);
-            
-            // Position in grid
-            lv_obj_set_grid_cell(s_tiles[i]->container, 
-                                 LV_GRID_ALIGN_STRETCH, col, 1,
-                                 LV_GRID_ALIGN_STRETCH, row, 1);
-        }
-    }
-    
-    s_needs_refresh = true;
+    // Initialize graphics with framebuffer
+    gfx_init(epd_get_framebuffer(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
 void ui_co2_display_update(void)
 {
-    // Update all sensor tiles
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (s_tiles[i] != NULL) {
-            ui_sensor_tile_update(s_tiles[i]);
-        }
-    }
+    // Clear screen to white
+    gfx_fill(false);
     
-    s_needs_refresh = true;
-}
-
-bool ui_co2_display_needs_refresh(void)
-{
-    return s_needs_refresh;
-}
-
-void ui_co2_display_mark_refreshed(void)
-{
-    s_needs_refresh = false;
+    // Draw 2x2 grid of sensor tiles
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        int col = i % GRID_COLS;
+        int row = i / GRID_COLS;
+        
+        int tile_x = col * (TILE_WIDTH + GRID_GAP);
+        int tile_y = row * (TILE_HEIGHT + GRID_GAP);
+        
+        draw_sensor_tile(tile_x, tile_y, TILE_WIDTH, TILE_HEIGHT, i);
+    }
 }

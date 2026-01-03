@@ -1,8 +1,8 @@
 /**
  * @file epd_driver.c
- * @brief E-Paper display driver for LVGL integration
+ * @brief E-Paper display driver (no LVGL)
  *
- * Waveshare 4.2" B/W E-Paper V1 (400x300) driver adapted for LVGL.
+ * Waveshare 4.2" B/W E-Paper V1 (400x300) driver.
  * Based on Waveshare official Arduino code (epd4in2.cpp).
  */
 
@@ -16,11 +16,10 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
-#include "lvgl.h"
-#include "src/draw/sw/lv_draw_sw.h"
 #include "epd_driver.h"
 
 static const char *TAG = "epd";
@@ -28,30 +27,17 @@ static const char *TAG = "epd";
 // SPI handle
 static spi_device_handle_t s_spi = NULL;
 
-// LVGL display handle
-static lv_display_t *s_disp = NULL;
-
-// Draw buffer for LVGL (partial rendering - 40 lines at a time)
-// For 1-bit color: 400 pixels / 8 bits = 50 bytes per line
-// 40 lines * 50 bytes = 2000 bytes
-#define EPD_BUF_LINES   40
-#define EPD_BUF_SIZE    ((EPD_WIDTH / 8) * EPD_BUF_LINES)
-static uint8_t s_lvgl_buf[EPD_BUF_SIZE];
-
-// Full framebuffer for e-paper (needed because e-paper requires full refresh)
+// Full framebuffer for e-paper
 // 400 * 300 / 8 = 15000 bytes
 #define EPD_FB_SIZE     ((EPD_WIDTH / 8) * EPD_HEIGHT)
 static uint8_t *s_framebuffer = NULL;
 
-// Flag to track if display needs refresh
-static bool s_needs_refresh = false;
-
-// LUT tables from Waveshare for partial refresh (faster updates)
+// Full refresh LUT tables from Waveshare EPD_4in2.c
 static const uint8_t lut_vcom0[] = {
-    0x00, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x00, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x17, 0x00, 0x00, 0x00, 0x02,
+    0x00, 0x17, 0x17, 0x00, 0x00, 0x02,
+    0x00, 0x0A, 0x01, 0x00, 0x00, 0x01,
+    0x00, 0x0E, 0x0E, 0x00, 0x00, 0x02,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -59,40 +45,40 @@ static const uint8_t lut_vcom0[] = {
 };
 
 static const uint8_t lut_ww[] = {
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
+    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
+    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 static const uint8_t lut_bw[] = {
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
+    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
+    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 static const uint8_t lut_bb[] = {
-    0xA0, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x50, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
+    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
+    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 static const uint8_t lut_wb[] = {
-    0x20, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x90, 0x0F, 0x0F, 0x00, 0x00, 0x01,
-    0x10, 0x08, 0x08, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
+    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
+    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
+    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -149,7 +135,6 @@ static void epd_data_bulk(const uint8_t *data, size_t len)
     gpio_set_level(EPD_PIN_DC, 1);
     gpio_set_level(EPD_PIN_CS, 0);
     
-    // Send in chunks to avoid SPI buffer limits
     const size_t chunk_size = 1024;
     while (len > 0) {
         size_t to_send = (len > chunk_size) ? chunk_size : len;
@@ -165,22 +150,16 @@ static void epd_data_bulk(const uint8_t *data, size_t len)
     gpio_set_level(EPD_PIN_CS, 1);
 }
 
-/**
- * @brief Wait for BUSY pin to go HIGH (idle)
- * 
- * Per Waveshare EPD_4IN2_ReadBusy(): polls GET_STATUS (0x71) command
- * while waiting. BUSY pin is LOW when busy, HIGH when idle.
- */
 static void epd_wait_busy(void)
 {
     ESP_LOGD(TAG, "Waiting for display...");
-    epd_cmd(0x71);  // GET_STATUS - per Waveshare
+    epd_cmd(0x71);
     int count = 0;
-    while (gpio_get_level(EPD_PIN_BUSY) == 0) {  // LOW = busy
-        epd_cmd(0x71);  // Poll status while waiting
+    while (gpio_get_level(EPD_PIN_BUSY) == 0) {
+        epd_cmd(0x71);
         vTaskDelay(pdMS_TO_TICKS(100));
         count++;
-        if (count > 300) {  // 30 second timeout
+        if (count > 300) {
             ESP_LOGE(TAG, "Timeout waiting for display!");
             return;
         }
@@ -188,9 +167,6 @@ static void epd_wait_busy(void)
     ESP_LOGD(TAG, "Display ready");
 }
 
-/**
- * @brief Hardware reset sequence from Waveshare
- */
 static void epd_reset(void)
 {
     gpio_set_level(EPD_PIN_RST, 0);
@@ -231,64 +207,47 @@ static esp_err_t spi_init(void)
     return spi_bus_add_device(SPI2_HOST, &dev, &s_spi);
 }
 
-/**
- * @brief Set LUT tables for full refresh
- * 
- * Per Waveshare EPD_4IN2_SetLut(): sends 36 bytes per table
- * Register assignments:
- *   0x20 = VCOM
- *   0x21 = WW (white to white)
- *   0x22 = BW (black to white)
- *   0x23 = WB (white to black)
- *   0x24 = BB (black to black)
- */
 static void epd_set_lut(void)
 {
-    epd_cmd(0x20);  // LUT_FOR_VCOM
+    epd_cmd(0x20);
     for (int i = 0; i < 36; i++) epd_data(lut_vcom0[i]);
     
-    epd_cmd(0x21);  // LUT_WHITE_TO_WHITE
+    epd_cmd(0x21);
     for (int i = 0; i < 36; i++) epd_data(lut_ww[i]);
     
-    epd_cmd(0x22);  // LUT_BLACK_TO_WHITE
+    epd_cmd(0x22);
     for (int i = 0; i < 36; i++) epd_data(lut_bw[i]);
     
-    epd_cmd(0x23);  // LUT_WHITE_TO_BLACK
+    epd_cmd(0x23);
     for (int i = 0; i < 36; i++) epd_data(lut_wb[i]);
     
-    epd_cmd(0x24);  // LUT_BLACK_TO_BLACK
+    epd_cmd(0x24);
     for (int i = 0; i < 36; i++) epd_data(lut_bb[i]);
 }
 
-/**
- * @brief Initialize display with Waveshare sequence
- * 
- * Based on official Waveshare EPD_4in2.c EPD_4IN2_Init_Fast() function.
- * Must load LUT waveform tables for proper pixel driving.
- */
 static void epd_init_display(void)
 {
     epd_reset();
     
     epd_cmd(0x01);  // POWER_SETTING
-    epd_data(0x03);  // VDS_EN, VDG_EN (internal DC-DC)
-    epd_data(0x00);  // VCOM_HV, VGHL_LV[1:0] (VGH=20V, VGL=-20V)
-    epd_data(0x2B);  // VDH = 15V
-    epd_data(0x2B);  // VDL = -15V
+    epd_data(0x03);
+    epd_data(0x00);
+    epd_data(0x2B);
+    epd_data(0x2B);
     
     epd_cmd(0x06);  // BOOSTER_SOFT_START
-    epd_data(0x17);  // Phase A
-    epd_data(0x17);  // Phase B
-    epd_data(0x17);  // Phase C
+    epd_data(0x17);
+    epd_data(0x17);
+    epd_data(0x17);
     
     epd_cmd(0x04);  // POWER_ON
     epd_wait_busy();
     
     epd_cmd(0x00);  // PANEL_SETTING
-    epd_data(0xBF);  // KW mode, LUT from register, scan up, shift right
+    epd_data(0xBF);
     
     epd_cmd(0x30);  // PLL_CONTROL
-    epd_data(0x3C);  // 100Hz frame rate
+    epd_data(0x3C);
     
     epd_cmd(0x61);  // RESOLUTION_SETTING
     epd_data(0x01);
@@ -297,62 +256,12 @@ static void epd_init_display(void)
     epd_data(0x2C);  // 300
     
     epd_cmd(0x82);  // VCM_DC_SETTING
-    epd_data(0x12);  // VCOM DC level
+    epd_data(0x28);
     
     epd_cmd(0x50);  // VCOM_AND_DATA_INTERVAL_SETTING
-    epd_data(0x97);  // CDI=9, DDX=1, VBD=1 (white border)
+    epd_data(0x97);
     
-    // Load waveform LUT tables - CRITICAL for proper black/white driving
     epd_set_lut();
-}
-
-// ----------------------------------------------------------------------------
-// LVGL flush callback
-// ----------------------------------------------------------------------------
-
-static void epd_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-{
-    int32_t area_h = lv_area_get_height(area);
-    
-    // LVGL I1 format includes an 8-byte palette at the start (2 colors * 4 bytes each)
-    // Skip the palette to get to the actual pixel data
-    static const int32_t I1_PALETTE_SIZE = 8;
-    uint8_t *pixel_data = px_map + I1_PALETTE_SIZE;
-    
-    // Get the actual stride from LVGL's draw buffer
-    lv_draw_buf_t *draw_buf = lv_display_get_buf_active(disp);
-    int32_t src_stride = draw_buf->header.stride;
-    
-    // LVGL I1: bit=1 when luminance > 127 (white), bit=0 when dark (black)
-    // E-paper: 0xFF = white, 0x00 = black
-    // Polarity matches - no inversion needed
-    
-    // Destination stride is always the full display width
-    int32_t dst_stride = EPD_WIDTH / 8;  // 50 bytes for 400 pixels
-    
-    // For full-width areas starting at x=0, we can do a direct memcpy per row
-    if (area->x1 == 0 && area->x2 == EPD_WIDTH - 1) {
-        // Source and dest strides should match for full width
-        for (int32_t y = 0; y < area_h; y++) {
-            memcpy(&s_framebuffer[(area->y1 + y) * dst_stride], 
-                   &pixel_data[y * src_stride], 
-                   dst_stride);
-        }
-    } else {
-        // Partial width - copy row by row
-        int32_t start_byte = area->x1 / 8;
-        int32_t end_byte = area->x2 / 8;
-        int32_t bytes_per_row = end_byte - start_byte + 1;
-        
-        for (int32_t y = 0; y < area_h; y++) {
-            int32_t src_offset = y * src_stride + start_byte;
-            int32_t dst_offset = (area->y1 + y) * dst_stride + start_byte;
-            memcpy(&s_framebuffer[dst_offset], &pixel_data[src_offset], bytes_per_row);
-        }
-    }
-    
-    s_needs_refresh = true;
-    lv_display_flush_ready(disp);
 }
 
 // ----------------------------------------------------------------------------
@@ -363,7 +272,6 @@ esp_err_t epd_init(void)
 {
     ESP_LOGI(TAG, "Initializing 4.2\" B/W e-paper display...");
     
-    // Initialize GPIOs
     gpio_init_output(EPD_PIN_RST);
     gpio_init_output(EPD_PIN_DC);
     gpio_init_output(EPD_PIN_CS);
@@ -373,14 +281,12 @@ esp_err_t epd_init(void)
     gpio_set_level(EPD_PIN_DC, 1);
     gpio_set_level(EPD_PIN_CS, 1);
     
-    // Initialize SPI
     esp_err_t ret = spi_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI init failed: %s", esp_err_to_name(ret));
         return ret;
     }
     
-    // Allocate framebuffer
     s_framebuffer = heap_caps_malloc(EPD_FB_SIZE, MALLOC_CAP_DMA);
     if (s_framebuffer == NULL) {
         ESP_LOGE(TAG, "Failed to allocate framebuffer!");
@@ -388,10 +294,8 @@ esp_err_t epd_init(void)
     }
     memset(s_framebuffer, 0xFF, EPD_FB_SIZE);  // White
     
-    // Initialize display hardware
     epd_init_display();
     
-    // Perform initial clear to remove any residual image/yellowing
     ESP_LOGI(TAG, "Performing initial display clear...");
     epd_clear();
     
@@ -399,57 +303,20 @@ esp_err_t epd_init(void)
     return ESP_OK;
 }
 
-esp_err_t epd_lvgl_init(void)
-{
-    ESP_LOGI(TAG, "Initializing LVGL display driver...");
-    
-    // Create display
-    s_disp = lv_display_create(EPD_WIDTH, EPD_HEIGHT);
-    if (s_disp == NULL) {
-        ESP_LOGE(TAG, "Failed to create LVGL display!");
-        return ESP_FAIL;
-    }
-    
-    // Set color format to 1-bit (I1)
-    lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_I1);
-    
-    // Set up draw buffer - single buffer, partial rendering
-    lv_display_set_buffers(s_disp, s_lvgl_buf, NULL, sizeof(s_lvgl_buf), 
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
-    
-    // Set flush callback
-    lv_display_set_flush_cb(s_disp, epd_flush_cb);
-    
-    ESP_LOGI(TAG, "LVGL display driver initialized");
-    return ESP_OK;
-}
-
 void epd_refresh(void)
 {
-    if (!s_needs_refresh) {
-        return;
-    }
-    
     ESP_LOGI(TAG, "Refreshing display...");
     
-    // Per Waveshare EPD_4IN2_Display():
-    // Send old data (DATA_START_TRANSMISSION_1) - all 0x00
-    // This provides "previous" frame state for LUT transitions
     epd_cmd(0x10);
-    for (size_t i = 0; i < EPD_FB_SIZE; i++) {
-        epd_data(0x00);
-    }
+    epd_data_bulk(s_framebuffer, EPD_FB_SIZE);
     
-    // Send new data (DATA_START_TRANSMISSION_2) - actual image
     epd_cmd(0x13);
     epd_data_bulk(s_framebuffer, EPD_FB_SIZE);
     
-    // Trigger refresh - LUT already loaded during init
-    epd_cmd(0x12);  // DISPLAY_REFRESH
+    epd_cmd(0x12);
     vTaskDelay(pdMS_TO_TICKS(10));
     epd_wait_busy();
     
-    s_needs_refresh = false;
     ESP_LOGI(TAG, "Display refresh complete");
 }
 
@@ -457,44 +324,39 @@ void epd_clear(void)
 {
     ESP_LOGI(TAG, "Clearing display...");
     
-    // Per Waveshare EPD_4IN2_Clear(): send 0xFF for BOTH old and new data
-    // This clears to white without forcing transitions through LUT
-    epd_cmd(0x10);  // DATA_START_TRANSMISSION_1 (old data)
+    epd_cmd(0x10);
     for (size_t i = 0; i < EPD_FB_SIZE; i++) {
         epd_data(0xFF);
     }
     
-    epd_cmd(0x13);  // DATA_START_TRANSMISSION_2 (new data)
+    epd_cmd(0x13);
     for (size_t i = 0; i < EPD_FB_SIZE; i++) {
         epd_data(0xFF);
     }
     
-    // Refresh display
-    epd_cmd(0x12);  // DISPLAY_REFRESH
+    epd_cmd(0x12);
     vTaskDelay(pdMS_TO_TICKS(1));
     epd_wait_busy();
     
-    // Update local framebuffer
     memset(s_framebuffer, 0xFF, EPD_FB_SIZE);
-    s_needs_refresh = false;
 }
 
 bool epd_is_busy(void)
 {
-    return gpio_get_level(EPD_PIN_BUSY) == 0;  // LOW = busy
+    return gpio_get_level(EPD_PIN_BUSY) == 0;
 }
 
 void epd_sleep(void)
 {
-    epd_cmd(0x50);  // VCOM_AND_DATA_INTERVAL_SETTING
-    epd_data(0x17);  // Border floating
+    epd_cmd(0x50);
+    epd_data(0x17);
     
-    epd_cmd(0x82);  // VCM_DC_SETTING - VCOM to 0V
+    epd_cmd(0x82);
     
-    epd_cmd(0x00);  // PANEL_SETTING
+    epd_cmd(0x00);
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    epd_cmd(0x01);  // POWER_SETTING - VG&VS to 0V fast
+    epd_cmd(0x01);
     epd_data(0x00);
     epd_data(0x00);
     epd_data(0x00);
@@ -502,14 +364,19 @@ void epd_sleep(void)
     epd_data(0x00);
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    epd_cmd(0x02);  // POWER_OFF
+    epd_cmd(0x02);
     epd_wait_busy();
     
-    epd_cmd(0x07);  // DEEP_SLEEP
+    epd_cmd(0x07);
     epd_data(0xA5);
 }
 
 void epd_wake(void)
 {
     epd_init_display();
+}
+
+uint8_t *epd_get_framebuffer(void)
+{
+    return s_framebuffer;
 }

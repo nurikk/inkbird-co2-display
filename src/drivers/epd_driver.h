@@ -1,8 +1,8 @@
 /**
  * @file epd_driver.h
- * @brief E-Paper display driver for LVGL integration
+ * @brief E-Paper display driver (no LVGL)
  *
- * Waveshare 4.2" B/W E-Paper V1 (400x300) driver adapted for LVGL.
+ * Waveshare 4.2" B/W E-Paper V1 (400x300) driver.
  */
 
 #ifndef EPD_DRIVER_H
@@ -30,56 +30,41 @@ extern "C" {
 
 /**
  * @brief Initialize the e-paper display hardware
- *
- * Sets up GPIO, SPI, and performs display initialization sequence.
- *
- * @return ESP_OK on success, error code otherwise
+ * @return ESP_OK on success
  */
 esp_err_t epd_init(void);
 
 /**
- * @brief Initialize LVGL display driver
- *
- * Creates LVGL display, sets up buffers, and registers flush callback.
- * Must be called after epd_init() and lv_init().
- *
- * @return ESP_OK on success, error code otherwise
- */
-esp_err_t epd_lvgl_init(void);
-
-/**
  * @brief Trigger a full display refresh
- *
- * Sends the current framebuffer to the display and performs a full refresh.
- * This is a blocking operation that takes ~2-4 seconds.
  */
 void epd_refresh(void);
-
-/**
- * @brief Put the display into deep sleep mode
- *
- * Reduces power consumption when display updates are not needed.
- */
-void epd_sleep(void);
-
-/**
- * @brief Wake the display from deep sleep
- *
- * Must be called before any display operations after epd_sleep().
- */
-void epd_wake(void);
-
-/**
- * @brief Check if the display is currently busy
- *
- * @return true if display is busy refreshing, false if idle
- */
-bool epd_is_busy(void);
 
 /**
  * @brief Clear the display to white
  */
 void epd_clear(void);
+
+/**
+ * @brief Put the display into deep sleep mode
+ */
+void epd_sleep(void);
+
+/**
+ * @brief Wake the display from deep sleep
+ */
+void epd_wake(void);
+
+/**
+ * @brief Check if the display is currently busy
+ * @return true if busy, false if idle
+ */
+bool epd_is_busy(void);
+
+/**
+ * @brief Get pointer to framebuffer for direct drawing
+ * @return Pointer to framebuffer (400*300/8 = 15000 bytes)
+ */
+uint8_t *epd_get_framebuffer(void);
 
 #ifdef __cplusplus
 }
