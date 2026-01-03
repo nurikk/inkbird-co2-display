@@ -13,7 +13,11 @@ idf_component_register(
         "${CMAKE_SOURCE_DIR}/src/drivers"
         "${CMAKE_SOURCE_DIR}/src/ui"
         "${CMAKE_SOURCE_DIR}/src/data"
+        "${CMAKE_SOURCE_DIR}/src/ble"
     REQUIRES 
         driver
         esp_timer
+        nvs_flash
+    PRIV_REQUIRES
+        bt
 )

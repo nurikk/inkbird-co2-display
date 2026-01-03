@@ -44,6 +44,7 @@ typedef struct {
     uint16_t co2_ppm;       // CO2 concentration in ppm (0-5000 typical)
     int16_t  temperature;   // Temperature in 0.1°C units (e.g., 234 = 23.4°C)
     uint16_t humidity;      // Relative humidity in 0.1% units (e.g., 456 = 45.6%)
+    uint16_t pressure;      // Atmospheric pressure in hPa (e.g., 1013 = 1013 hPa)
     uint32_t timestamp;     // Reading timestamp (milliseconds since boot)
 } sensor_reading_t;
 
