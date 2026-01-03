@@ -366,9 +366,22 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
     ESP_LOGI(TAG, "One-shot read: sensor %d (%s), timeout %lu ms",
              sensor_idx, INKBIRD_SENSORS[sensor_idx].name, timeout_ms);
 
+    // Close any existing connection first
+    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        ESP_LOGW(TAG, "Closing existing connection before new read");
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for disconnect to complete
+    }
+
+    // Drain any pending semaphore signals from previous operations
+    while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {
+        // Consume stale signals
+    }
+
     // Set up for this sensor
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
+    s_connected = false;  // Reset connection state
     memcpy(s_target_bda, INKBIRD_SENSORS[sensor_idx].mac, 6);
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
@@ -416,8 +429,9 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
     // Disconnect if still connected
     if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
         esp_ble_gattc_close(s_gattc_if, s_conn_id);
-        vTaskDelay(pdMS_TO_TICKS(500));  // Brief delay for clean disconnect
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for disconnect to complete
     }
+    s_connected = false;  // Ensure state is reset
 
     return result;
 }
