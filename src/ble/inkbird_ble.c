@@ -344,6 +344,84 @@ bool inkbird_ble_is_connected(uint8_t index)
     return s_connected && (s_current_sensor_index == index);
 }
 
+esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
+                                        uint32_t timeout_ms,
+                                        inkbird_reading_t *out_reading)
+{
+    if (!s_ble_initialized) {
+        ESP_LOGE(TAG, "BLE not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (sensor_idx >= INKBIRD_SENSOR_COUNT) {
+        ESP_LOGE(TAG, "Invalid sensor index: %d", sensor_idx);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!INKBIRD_SENSORS[sensor_idx].enabled) {
+        ESP_LOGE(TAG, "Sensor %d is not enabled", sensor_idx);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "One-shot read: sensor %d (%s), timeout %lu ms",
+             sensor_idx, INKBIRD_SENSORS[sensor_idx].name, timeout_ms);
+
+    // Set up for this sensor
+    s_current_sensor_index = sensor_idx;
+    s_data_received = false;
+    memcpy(s_target_bda, INKBIRD_SENSORS[sensor_idx].mac, 6);
+
+    ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
+             s_target_bda[0], s_target_bda[1], s_target_bda[2],
+             s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+
+    // Open connection (try public address first)
+    esp_err_t ret = esp_ble_gattc_open(
+        s_gattc_if, s_target_bda,
+        BLE_ADDR_TYPE_PUBLIC, true);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "GATTC open failed with public addr: %s, trying random",
+                 esp_err_to_name(ret));
+        ret = esp_ble_gattc_open(
+            s_gattc_if, s_target_bda,
+            BLE_ADDR_TYPE_RANDOM, true);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initiate connection: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Wait for data or timeout
+    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem,
+                                         pdMS_TO_TICKS(timeout_ms));
+
+    esp_err_t result;
+    if (got_sem == pdTRUE && s_data_received) {
+        ESP_LOGI(TAG, "One-shot read successful for sensor %d", sensor_idx);
+
+        // Copy reading if output pointer provided
+        if (out_reading != NULL) {
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            *out_reading = s_readings[sensor_idx];
+            xSemaphoreGive(s_ble_mutex);
+        }
+        result = ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "One-shot read timeout/failed for sensor %d", sensor_idx);
+        result = ESP_ERR_TIMEOUT;
+    }
+
+    // Disconnect if still connected
+    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(500));  // Brief delay for clean disconnect
+    }
+
+    return result;
+}
+
 esp_err_t inkbird_ble_discover(void)
 {
     if (!s_ble_initialized) {
@@ -1345,6 +1423,11 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",
              s_target_bda[0], s_target_bda[1], s_target_bda[2],
              s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+
+    // Drain any pending semaphore signals from previous operations
+    while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {
+        // Consume any stale signals
+    }
 
     esp_err_t ret = esp_ble_gattc_open(
         s_gattc_if, s_target_bda,

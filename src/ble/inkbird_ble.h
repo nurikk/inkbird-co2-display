@@ -133,6 +133,22 @@ esp_err_t inkbird_ble_stop(void);
 inkbird_reading_t inkbird_ble_get_reading(uint8_t index);
 
 /**
+ * @brief Read current sensor value (one-shot blocking call)
+ *
+ * Connects to the specified sensor, waits for a single real-time
+ * notification, parses the data, and disconnects. Used for quick
+ * startup reads before beginning periodic polling.
+ *
+ * @param sensor_idx Sensor index (0 to INKBIRD_SENSOR_COUNT-1)
+ * @param timeout_ms Connection/read timeout in milliseconds
+ * @param out_reading Pointer to store the reading (can be NULL)
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT on timeout, error code otherwise
+ */
+esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
+                                        uint32_t timeout_ms,
+                                        inkbird_reading_t *out_reading);
+
+/**
  * @brief Check if a sensor is currently connected
  *
  * @param index Sensor index (0 to INKBIRD_SENSOR_COUNT-1)

@@ -118,6 +118,17 @@ static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
 // Number of read cycles to skip after max failures reached
 #define INKBIRD_SKIP_CYCLES_ON_FAILURE  10
 
+// ============================================================================
+// Startup Configuration
+// ============================================================================
+
+// Timeout for initial real-time sensor read at startup (milliseconds)
+// Shorter than normal timeout for snappier startup
+#define INKBIRD_STARTUP_READ_TIMEOUT_MS  30000
+
+// Number of retry attempts for initial sensor read at startup
+#define INKBIRD_STARTUP_READ_RETRIES     3
+
 #ifdef __cplusplus
 }
 #endif

@@ -158,6 +158,10 @@ static void draw_sensor_tile(int tile_x, int tile_y, int tile_w, int tile_h, int
         
         if (chart_h > 10 && history_count > 1) {
             draw_chart(x, y, w, chart_h, history, history_count);
+        } else {
+            // No history yet - draw empty chart area with message
+            gfx_draw_rect(x, y, w, chart_h, true);
+            gfx_draw_string(x + w/2 - 30, y + chart_h/2 - 4, "No history", GFX_FONT_SMALL, true);
         }
     }
 }
