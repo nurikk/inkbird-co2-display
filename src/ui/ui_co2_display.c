@@ -175,6 +175,16 @@ void ui_co2_display_init(void)
     gfx_init(epd_get_framebuffer(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
+void ui_co2_display_loading(void)
+{
+    // Clear screen to white
+    gfx_fill(false);
+    
+    // Draw centered loading message
+    gfx_draw_string_centered(DISPLAY_HEIGHT / 2 - 20, "CO2 Display", GFX_FONT_LARGE, true);
+    gfx_draw_string_centered(DISPLAY_HEIGHT / 2 + 16, "Connecting to sensors...", GFX_FONT_SMALL, true);
+}
+
 void ui_co2_display_update(void)
 {
     // Clear screen to white

@@ -309,6 +309,11 @@ void app_main(void)
         ESP_LOGI(TAG, "Initializing UI...");
         ui_co2_display_init();
 
+        // Show loading screen immediately
+        ESP_LOGI(TAG, "Showing loading screen...");
+        ui_co2_display_loading();
+        epd_refresh();
+
         // ========== PHASE 1: Read current real-time values ==========
         ESP_LOGI(TAG, "");
         ESP_LOGI(TAG, "========================================");

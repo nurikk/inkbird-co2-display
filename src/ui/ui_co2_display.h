@@ -20,6 +20,11 @@ void ui_co2_display_init(void);
  */
 void ui_co2_display_update(void);
 
+/**
+ * @brief Show loading screen during startup
+ */
+void ui_co2_display_loading(void);
+
 #ifdef __cplusplus
 }
 #endif
