@@ -1,10 +1,3 @@
-/**
- * @file epd_driver.h
- * @brief E-Paper display driver (no LVGL)
- *
- * Waveshare 4.2" B/W E-Paper V1 (400x300) driver.
- */
-
 #ifndef EPD_DRIVER_H
 #define EPD_DRIVER_H
 
@@ -16,20 +9,43 @@
 extern "C" {
 #endif
 
-// Display dimensions
-#define EPD_WIDTH   400
-#define EPD_HEIGHT  300
+#ifndef SCREEN_WIDTH
+#define SCREEN_WIDTH 320
+#endif
 
-// Pin configuration for ESP32-C3
-#define EPD_PIN_MOSI    7
-#define EPD_PIN_SCK     6
-#define EPD_PIN_CS      10
-#define EPD_PIN_DC      1
-#define EPD_PIN_RST     0
-#define EPD_PIN_BUSY    3
+#ifndef SCREEN_HEIGHT
+#define SCREEN_HEIGHT 480
+#endif
+
+#ifndef SCREEN_ROTATE
+#define SCREEN_ROTATE 0
+#endif
+
+#define EPD_WIDTH   SCREEN_WIDTH
+#define EPD_HEIGHT  SCREEN_HEIGHT
+
+#ifndef PANEL_BGR
+#define PANEL_BGR 1
+#endif
+
+#ifndef PANEL_INVERT_COLOR
+#define PANEL_INVERT_COLOR 0
+#endif
+
+#ifndef PANEL_BL_ACTIVE_LOW
+#define PANEL_BL_ACTIVE_LOW 0
+#endif
+
+#define EPD_PIN_MOSI    13
+#define EPD_PIN_MISO    12
+#define EPD_PIN_SCK     14
+#define EPD_PIN_CS      15
+#define EPD_PIN_DC      2
+#define EPD_PIN_RST     -1
+#define EPD_PIN_BL      27
 
 /**
- * @brief Initialize the e-paper display hardware
+ * @brief Initialize the TFT display hardware
  * @return ESP_OK on success
  */
 esp_err_t epd_init(void);
@@ -62,7 +78,7 @@ bool epd_is_busy(void);
 
 /**
  * @brief Get pointer to framebuffer for direct drawing
- * @return Pointer to framebuffer (400*300/8 = 15000 bytes)
+ * @return Pointer to framebuffer (1 byte per pixel, 0=white, 1=black)
  */
 uint8_t *epd_get_framebuffer(void);
 

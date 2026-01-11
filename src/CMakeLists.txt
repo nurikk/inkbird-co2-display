@@ -16,6 +16,7 @@ idf_component_register(
         "${CMAKE_SOURCE_DIR}/src/ble"
     REQUIRES 
         driver
+        esp_lcd
         esp_timer
         nvs_flash
     PRIV_REQUIRES

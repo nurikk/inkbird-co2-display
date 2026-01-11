@@ -2,13 +2,13 @@
  * @file ui_co2_display.c
  * @brief CO2 display UI using direct framebuffer rendering
  *
- * Layout (400x300 pixels):
+ * Layout (240x320 pixels):
  * ┌───────────────────┬───────────────────┐
  * │     Sensor 1      │     Sensor 2      │
- * │     (198x148)     │     (198x148)     │
+ * │     (159x119)     │     (159x119)     │
  * ├───────────────────┼───────────────────┤
  * │     Sensor 3      │     Sensor 4      │
- * │     (198x148)     │     (198x148)     │
+ * │     (159x119)     │     (159x119)     │
  * └───────────────────┴───────────────────┘
  */
 
@@ -30,8 +30,8 @@
 #define GRID_GAP        2
 
 // Tile dimensions
-#define TILE_WIDTH      ((DISPLAY_WIDTH - GRID_GAP) / GRID_COLS)   // 199
-#define TILE_HEIGHT     ((DISPLAY_HEIGHT - GRID_GAP) / GRID_ROWS)  // 149
+#define TILE_WIDTH      ((DISPLAY_WIDTH - GRID_GAP) / GRID_COLS)
+#define TILE_HEIGHT     ((DISPLAY_HEIGHT - GRID_GAP) / GRID_ROWS)
 
 // Padding inside tiles
 #define TILE_PAD        4

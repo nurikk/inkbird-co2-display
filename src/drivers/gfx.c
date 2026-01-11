@@ -1,8 +1,3 @@
-/**
- * @file gfx.c
- * @brief Simple graphics library for e-paper display
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +7,7 @@
 static uint8_t *s_fb = NULL;
 static int s_width = 0;
 static int s_height = 0;
-static int s_stride = 0;  // bytes per row
+static int s_stride = 0;
 
 // 8x8 font - ASCII 32-90 (space to Z)
 static const uint8_t font_8x8[][8] = {
@@ -197,27 +192,28 @@ void gfx_init(uint8_t *framebuffer, int width, int height)
     s_fb = framebuffer;
     s_width = width;
     s_height = height;
-    s_stride = width / 8;
+    s_stride = (width + 7) / 8;
 }
 
 void gfx_fill(bool black)
 {
     if (s_fb == NULL) return;
-    memset(s_fb, black ? 0x00 : 0xFF, s_stride * s_height);
+    uint8_t color = black ? 0xFF : 0x00;
+    int count = s_stride * s_height;
+    memset(s_fb, color, (size_t)count);
 }
 
 void gfx_set_pixel(int x, int y, bool black)
 {
     if (s_fb == NULL) return;
     if (x < 0 || x >= s_width || y < 0 || y >= s_height) return;
-    
-    int byte_idx = y * s_stride + x / 8;
-    int bit_idx = 7 - (x % 8);
-    
+
+    size_t index = (size_t)(y * s_stride) + (x >> 3);
+    uint8_t mask = 0x80 >> (x & 0x07);
     if (black) {
-        s_fb[byte_idx] &= ~(1 << bit_idx);
+        s_fb[index] |= mask;
     } else {
-        s_fb[byte_idx] |= (1 << bit_idx);
+        s_fb[index] &= (uint8_t)~mask;
     }
 }
 

@@ -2,7 +2,7 @@
  * @file main.c
  * @brief CO2 Sensor Display - Main Application
  *
- * ESP32-C3 based CO2 sensor display using 4.2" e-paper.
+ * ESP32 based CO2 sensor display using 2.4" TFT.
  * Displays readings from 4 Inkbird IAM-T1 CO2 sensors via BLE.
  */
 
@@ -26,7 +26,7 @@ static const char *TAG = "main";
 
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
-#define DISPLAY_REFRESH_MS      60000   // E-paper refresh interval (1 minute)
+#define DISPLAY_REFRESH_MS      60000   // TFT refresh interval (1 minute)
 
 // History download configuration
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
@@ -247,15 +247,14 @@ void app_main(void)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  CO2 Sensor Display");
-    ESP_LOGI(TAG, "  ESP32-C3 + E-Paper + Inkbird BLE");
+    ESP_LOGI(TAG, "  ESP32 + TFT + Inkbird BLE");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
     
-    // Initialize e-paper display hardware
-    ESP_LOGI(TAG, "Initializing e-paper display...");
+    ESP_LOGI(TAG, "Initializing TFT display...");
     esp_err_t ret = epd_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "E-paper init failed!");
+        ESP_LOGE(TAG, "TFT init failed!");
         return;
     }
     

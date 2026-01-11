@@ -1,3 +1,2 @@
 dependencies:
-  tuanpmt/esp_epaper: "^2.0.0"
   lvgl/lvgl: "^9.4.0"

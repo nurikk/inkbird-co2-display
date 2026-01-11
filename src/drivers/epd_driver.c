@@ -1,379 +1,277 @@
-/**
- * @file epd_driver.c
- * @brief E-Paper display driver (no LVGL)
- *
- * Waveshare 4.2" B/W E-Paper V1 (400x300) driver.
- * Based on Waveshare official Arduino code (epd4in2.cpp).
- */
-
-#include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
-#include <stdlib.h>
 
 #include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_log.h"
+#include "esp_check.h"
+#include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_st7789.h"
+#include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
 #include "epd_driver.h"
 
-static const char *TAG = "epd";
+static const char *TAG = "display";
 
-// SPI handle
-static spi_device_handle_t s_spi = NULL;
+#define LCD_SPI_HOST         SPI2_HOST
+#define LCD_PIXEL_CLOCK_HZ   (8000000)
+#define LCD_DRAW_BUF_LINES   40
 
-// Full framebuffer for e-paper
-// 400 * 300 / 8 = 15000 bytes
-#define EPD_FB_SIZE     ((EPD_WIDTH / 8) * EPD_HEIGHT)
+#define ST7796_CMD_MADCTL    0x36
+#define ST7796_MADCTL_MY     0x80
+#define ST7796_MADCTL_MX     0x40
+#define ST7796_MADCTL_MV     0x20
+#define ST7796_MADCTL_BGR    0x08
+#define ST7796_MADCTL_RGB    0x00
+
+static esp_lcd_panel_io_handle_t s_io_handle = NULL;
+static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static uint8_t *s_framebuffer = NULL;
+static size_t s_fb_stride_bytes = 0;
+static uint16_t *s_line_buffer = NULL;
 
-// Full refresh LUT tables from Waveshare EPD_4in2.c
-static const uint8_t lut_vcom0[] = {
-    0x00, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x00, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x00, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0x00, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00,
-};
-
-static const uint8_t lut_ww[] = {
-    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_bw[] = {
-    0x40, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x40, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0xA0, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_bb[] = {
-    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-static const uint8_t lut_wb[] = {
-    0x80, 0x17, 0x00, 0x00, 0x00, 0x02,
-    0x90, 0x17, 0x17, 0x00, 0x00, 0x02,
-    0x80, 0x0A, 0x01, 0x00, 0x00, 0x01,
-    0x50, 0x0E, 0x0E, 0x00, 0x00, 0x02,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-// ----------------------------------------------------------------------------
-// Low-level GPIO/SPI functions
-// ----------------------------------------------------------------------------
-
-static void gpio_init_output(gpio_num_t pin)
+static esp_err_t flush_framebuffer(void)
 {
+    if (s_panel_handle == NULL || s_framebuffer == NULL || s_line_buffer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    for (int y = 0; y < EPD_HEIGHT; y++) {
+        const uint8_t *row = s_framebuffer + (y * s_fb_stride_bytes);
+        for (int x = 0; x < EPD_WIDTH; x++) {
+            uint8_t byte = row[x >> 3];
+            uint8_t mask = 0x80 >> (x & 0x07);
+            s_line_buffer[x] = (byte & mask) ? 0x0000 : 0xFFFF;
+        }
+
+        esp_err_t ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, EPD_WIDTH, y + 1, s_line_buffer);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Draw bitmap failed at line %d: %s", y, esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void backlight_init(void)
+{
+    if (EPD_PIN_BL < 0) {
+        return;
+    }
+
     gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << pin),
+        .pin_bit_mask = 1ULL << EPD_PIN_BL,
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&cfg);
+    gpio_set_level(EPD_PIN_BL, PANEL_BL_ACTIVE_LOW ? 0 : 1);
 }
 
-static void gpio_init_input(gpio_num_t pin)
+static esp_err_t lcd_spi_init(void)
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << pin),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
-}
-
-static void epd_cmd(uint8_t cmd)
-{
-    gpio_set_level(EPD_PIN_DC, 0);
-    gpio_set_level(EPD_PIN_CS, 0);
-    spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
-    spi_device_polling_transmit(s_spi, &t);
-    gpio_set_level(EPD_PIN_CS, 1);
-}
-
-static void epd_data(uint8_t data)
-{
-    gpio_set_level(EPD_PIN_DC, 1);
-    gpio_set_level(EPD_PIN_CS, 0);
-    spi_transaction_t t = { .length = 8, .tx_buffer = &data };
-    spi_device_polling_transmit(s_spi, &t);
-    gpio_set_level(EPD_PIN_CS, 1);
-}
-
-static void epd_data_bulk(const uint8_t *data, size_t len)
-{
-    gpio_set_level(EPD_PIN_DC, 1);
-    gpio_set_level(EPD_PIN_CS, 0);
-    
-    const size_t chunk_size = 1024;
-    while (len > 0) {
-        size_t to_send = (len > chunk_size) ? chunk_size : len;
-        spi_transaction_t t = { 
-            .length = to_send * 8, 
-            .tx_buffer = data 
-        };
-        spi_device_polling_transmit(s_spi, &t);
-        data += to_send;
-        len -= to_send;
-    }
-    
-    gpio_set_level(EPD_PIN_CS, 1);
-}
-
-static void epd_wait_busy(void)
-{
-    ESP_LOGD(TAG, "Waiting for display...");
-    epd_cmd(0x71);
-    int count = 0;
-    while (gpio_get_level(EPD_PIN_BUSY) == 0) {
-        epd_cmd(0x71);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        count++;
-        if (count > 300) {
-            ESP_LOGE(TAG, "Timeout waiting for display!");
-            return;
-        }
-    }
-    ESP_LOGD(TAG, "Display ready");
-}
-
-static void epd_reset(void)
-{
-    gpio_set_level(EPD_PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
-    gpio_set_level(EPD_PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(EPD_PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
-    gpio_set_level(EPD_PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    gpio_set_level(EPD_PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
-    gpio_set_level(EPD_PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
-}
-
-static esp_err_t spi_init(void)
-{
-    spi_bus_config_t bus = {
+    spi_bus_config_t buscfg = {
         .mosi_io_num = EPD_PIN_MOSI,
-        .miso_io_num = -1,
+        .miso_io_num = EPD_PIN_MISO,
         .sclk_io_num = EPD_PIN_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4096,
+        .max_transfer_sz = (EPD_WIDTH * LCD_DRAW_BUF_LINES * sizeof(uint16_t)) + 8,
     };
-    
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) return ret;
-    
-    spi_device_interface_config_t dev = {
-        .clock_speed_hz = 4000000,
-        .mode = 0,
-        .spics_io_num = -1,
-        .queue_size = 1,
+
+    return spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+}
+
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[16];
+    uint8_t data_bytes;
+    uint16_t delay_ms;
+    bool delay_only;
+} st7796_init_cmd_t;
+
+static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
+{
+    static const st7796_init_cmd_t init_cmds[] = {
+        { .delay_ms = 120, .delay_only = true },
+        { .cmd = 0x01, .delay_ms = 120 },
+        { .cmd = 0x11, .delay_ms = 120 },
+        { .cmd = 0xF0, .data = { 0xC3 }, .data_bytes = 1 },
+        { .cmd = 0xF0, .data = { 0x96 }, .data_bytes = 1 },
+        { .cmd = 0x36, .data = { 0x48 }, .data_bytes = 1 },
+        { .cmd = 0x3A, .data = { 0x55 }, .data_bytes = 1 },
+        { .cmd = 0xB4, .data = { 0x01 }, .data_bytes = 1 },
+        { .cmd = 0xB6, .data = { 0x80, 0x02, 0x3B }, .data_bytes = 3 },
+        { .cmd = 0xE8, .data = { 0x40, 0x8A, 0x00, 0x00, 0x29, 0x19, 0xA5, 0x33 }, .data_bytes = 8 },
+        { .cmd = 0xC1, .data = { 0x06 }, .data_bytes = 1 },
+        { .cmd = 0xC2, .data = { 0xA7 }, .data_bytes = 1 },
+        { .cmd = 0xC5, .data = { 0x18 }, .data_bytes = 1 },
+        { .delay_ms = 120, .delay_only = true },
+        { .cmd = 0xE0, .data = { 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B }, .data_bytes = 14 },
+        { .cmd = 0xE1, .data = { 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B }, .data_bytes = 14 },
+        { .delay_ms = 120, .delay_only = true },
+        { .cmd = 0xF0, .data = { 0x3C }, .data_bytes = 1 },
+        { .cmd = 0xF0, .data = { 0x69 }, .data_bytes = 1 },
+        { .delay_ms = 120, .delay_only = true },
+        { .cmd = 0x29 },
     };
-    
-    return spi_bus_add_device(SPI2_HOST, &dev, &s_spi);
+
+    for (size_t i = 0; i < sizeof(init_cmds) / sizeof(init_cmds[0]); i++) {
+        const st7796_init_cmd_t *cmd = &init_cmds[i];
+
+        if (!cmd->delay_only) {
+            esp_err_t ret = esp_lcd_panel_io_tx_param(io,
+                                                     cmd->cmd,
+                                                     cmd->data_bytes ? cmd->data : NULL,
+                                                     cmd->data_bytes);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "ST7796 init 0x%02X failed: %s", cmd->cmd, esp_err_to_name(ret));
+                return ret;
+            }
+        }
+
+        if (cmd->delay_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(cmd->delay_ms));
+        }
+    }
+
+    return ESP_OK;
 }
 
-static void epd_set_lut(void)
+static esp_err_t panel_apply_rotation(void)
 {
-    epd_cmd(0x20);
-    for (int i = 0; i < 36; i++) epd_data(lut_vcom0[i]);
-    
-    epd_cmd(0x21);
-    for (int i = 0; i < 36; i++) epd_data(lut_ww[i]);
-    
-    epd_cmd(0x22);
-    for (int i = 0; i < 36; i++) epd_data(lut_bw[i]);
-    
-    epd_cmd(0x23);
-    for (int i = 0; i < 36; i++) epd_data(lut_wb[i]);
-    
-    epd_cmd(0x24);
-    for (int i = 0; i < 36; i++) epd_data(lut_bb[i]);
-}
+    uint8_t madctl = PANEL_BGR ? ST7796_MADCTL_BGR : ST7796_MADCTL_RGB;
 
-static void epd_init_display(void)
-{
-    epd_reset();
-    
-    epd_cmd(0x01);  // POWER_SETTING
-    epd_data(0x03);
-    epd_data(0x00);
-    epd_data(0x2B);
-    epd_data(0x2B);
-    
-    epd_cmd(0x06);  // BOOSTER_SOFT_START
-    epd_data(0x17);
-    epd_data(0x17);
-    epd_data(0x17);
-    
-    epd_cmd(0x04);  // POWER_ON
-    epd_wait_busy();
-    
-    epd_cmd(0x00);  // PANEL_SETTING
-    epd_data(0xBF);
-    
-    epd_cmd(0x30);  // PLL_CONTROL
-    epd_data(0x3C);
-    
-    epd_cmd(0x61);  // RESOLUTION_SETTING
-    epd_data(0x01);
-    epd_data(0x90);  // 400
-    epd_data(0x01);
-    epd_data(0x2C);  // 300
-    
-    epd_cmd(0x82);  // VCM_DC_SETTING
-    epd_data(0x28);
-    
-    epd_cmd(0x50);  // VCOM_AND_DATA_INTERVAL_SETTING
-    epd_data(0x97);
-    
-    epd_set_lut();
-}
+    switch (SCREEN_ROTATE) {
+    case 1:
+        madctl |= ST7796_MADCTL_MV;
+        break;
+    case 2:
+        madctl |= ST7796_MADCTL_MY;
+        break;
+    case 3:
+        madctl |= ST7796_MADCTL_MX | ST7796_MADCTL_MY | ST7796_MADCTL_MV;
+        break;
+    default:
+        madctl |= ST7796_MADCTL_MX;
+        break;
+    }
 
-// ----------------------------------------------------------------------------
-// Public API
-// ----------------------------------------------------------------------------
+    return esp_lcd_panel_io_tx_param(s_io_handle, ST7796_CMD_MADCTL, &madctl, 1);
+}
 
 esp_err_t epd_init(void)
 {
-    ESP_LOGI(TAG, "Initializing 4.2\" B/W e-paper display...");
-    
-    gpio_init_output(EPD_PIN_RST);
-    gpio_init_output(EPD_PIN_DC);
-    gpio_init_output(EPD_PIN_CS);
-    gpio_init_input(EPD_PIN_BUSY);
-    
-    gpio_set_level(EPD_PIN_RST, 1);
-    gpio_set_level(EPD_PIN_DC, 1);
-    gpio_set_level(EPD_PIN_CS, 1);
-    
-    esp_err_t ret = spi_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI init failed: %s", esp_err_to_name(ret));
-        return ret;
+    ESP_LOGI(TAG, "Initializing TFT display...");
+
+    ESP_RETURN_ON_ERROR(lcd_spi_init(), TAG, "SPI bus init failed");
+
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = EPD_PIN_DC,
+        .cs_gpio_num = EPD_PIN_CS,
+        .pclk_hz = LCD_PIXEL_CLOCK_HZ,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
+    };
+
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_config, &s_io_handle),
+                        TAG,
+                        "Panel IO init failed");
+
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = EPD_PIN_RST,
+        .rgb_ele_order = PANEL_BGR ? LCD_RGB_ELEMENT_ORDER_BGR : LCD_RGB_ELEMENT_ORDER_RGB,
+        .data_endian = LCD_RGB_DATA_ENDIAN_LITTLE,
+        .bits_per_pixel = 16,
+    };
+
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(s_io_handle, &panel_config, &s_panel_handle),
+                        TAG,
+                        "Panel init failed");
+
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel_handle), TAG, "Panel reset failed");
+    ESP_RETURN_ON_ERROR(panel_init_st7796(s_io_handle), TAG, "ST7796 init failed");
+    if (PANEL_INVERT_COLOR) {
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel_handle, true), TAG, "Panel invert failed");
     }
-    
-    s_framebuffer = heap_caps_malloc(EPD_FB_SIZE, MALLOC_CAP_DMA);
+    ESP_RETURN_ON_ERROR(panel_apply_rotation(), TAG, "Panel rotation failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel_handle, true), TAG, "Panel on failed");
+
+    backlight_init();
+
+    s_fb_stride_bytes = (EPD_WIDTH + 7) / 8;
+    size_t framebuffer_size = s_fb_stride_bytes * EPD_HEIGHT;
+    s_framebuffer = heap_caps_malloc(framebuffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_framebuffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate framebuffer!");
+        s_framebuffer = heap_caps_malloc(framebuffer_size, MALLOC_CAP_DEFAULT);
+    }
+    if (s_framebuffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate framebuffer");
         return ESP_ERR_NO_MEM;
     }
-    memset(s_framebuffer, 0xFF, EPD_FB_SIZE);  // White
-    
-    epd_init_display();
-    
-    ESP_LOGI(TAG, "Performing initial display clear...");
-    epd_clear();
-    
-    ESP_LOGI(TAG, "E-paper display initialized (400x300 B/W)");
+    memset(s_framebuffer, 0, framebuffer_size);
+
+    size_t line_buf_size = EPD_WIDTH * sizeof(uint16_t);
+    s_line_buffer = heap_caps_malloc(line_buf_size, MALLOC_CAP_DMA);
+    if (s_line_buffer == NULL) {
+        s_line_buffer = heap_caps_malloc(line_buf_size, MALLOC_CAP_DEFAULT);
+    }
+    if (s_line_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate line buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "TFT display initialized (%dx%d)", EPD_WIDTH, EPD_HEIGHT);
     return ESP_OK;
 }
 
 void epd_refresh(void)
 {
-    ESP_LOGI(TAG, "Refreshing display...");
-    
-    epd_cmd(0x10);
-    epd_data_bulk(s_framebuffer, EPD_FB_SIZE);
-    
-    epd_cmd(0x13);
-    epd_data_bulk(s_framebuffer, EPD_FB_SIZE);
-    
-    epd_cmd(0x12);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    epd_wait_busy();
-    
-    ESP_LOGI(TAG, "Display refresh complete");
+    esp_err_t ret = flush_framebuffer();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Display refresh failed: %s", esp_err_to_name(ret));
+    }
 }
 
 void epd_clear(void)
 {
-    ESP_LOGI(TAG, "Clearing display...");
-    
-    epd_cmd(0x10);
-    for (size_t i = 0; i < EPD_FB_SIZE; i++) {
-        epd_data(0xFF);
+    if (s_framebuffer == NULL) {
+        return;
     }
-    
-    epd_cmd(0x13);
-    for (size_t i = 0; i < EPD_FB_SIZE; i++) {
-        epd_data(0xFF);
-    }
-    
-    epd_cmd(0x12);
-    vTaskDelay(pdMS_TO_TICKS(1));
-    epd_wait_busy();
-    
-    memset(s_framebuffer, 0xFF, EPD_FB_SIZE);
+
+    memset(s_framebuffer, 0, EPD_WIDTH * EPD_HEIGHT);
 }
 
 bool epd_is_busy(void)
 {
-    return gpio_get_level(EPD_PIN_BUSY) == 0;
+    return false;
 }
 
 void epd_sleep(void)
 {
-    epd_cmd(0x50);
-    epd_data(0x17);
-    
-    epd_cmd(0x82);
-    
-    epd_cmd(0x00);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    epd_cmd(0x01);
-    epd_data(0x00);
-    epd_data(0x00);
-    epd_data(0x00);
-    epd_data(0x00);
-    epd_data(0x00);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    epd_cmd(0x02);
-    epd_wait_busy();
-    
-    epd_cmd(0x07);
-    epd_data(0xA5);
+    if (s_panel_handle != NULL) {
+        esp_lcd_panel_disp_sleep(s_panel_handle, true);
+    }
 }
 
 void epd_wake(void)
 {
-    epd_init_display();
+    if (s_panel_handle != NULL) {
+        esp_lcd_panel_disp_sleep(s_panel_handle, false);
+    }
 }
 
 uint8_t *epd_get_framebuffer(void)

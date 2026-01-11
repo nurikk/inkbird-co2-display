@@ -1,8 +1,3 @@
-/**
- * @file gfx.h
- * @brief Simple graphics library for e-paper display
- */
-
 #ifndef GFX_H
 #define GFX_H
 
@@ -23,7 +18,7 @@ typedef enum {
 
 /**
  * @brief Initialize graphics library
- * @param framebuffer Pointer to display framebuffer
+ * @param framebuffer Pointer to display framebuffer (1 byte per pixel)
  * @param width Display width in pixels
  * @param height Display height in pixels
  */

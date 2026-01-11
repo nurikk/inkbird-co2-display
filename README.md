@@ -11,7 +11,7 @@ ESP32-based CO2 sensor display with BLE connectivity to Inkbird IAM-T1 sensors.
 This project creates a standalone air quality monitor that:
 
 - Connects to up to 4 Inkbird IAM-T1 CO2 sensors via Bluetooth Low Energy
-- Displays real-time CO2, temperature, and humidity on a 4.2" e-paper display
+- Displays real-time CO2, temperature, and humidity on a 3.5" TFT display (320x480)
 - Downloads and displays historical CO2 trends from sensor memory
 - Shows air quality status indicators (Good / Moderate / Warning / Alert)
 
@@ -25,20 +25,20 @@ Sensor configuration (MAC addresses and display names) is defined in `src/ble/in
 
 | Component | Model | Notes |
 |-----------|-------|-------|
-| MCU | ESP32-C3-DevKitM-1 | ESP32-C3 with built-in BLE |
-| Display | Waveshare 4.2" B/W E-Paper | 400x300 pixels, SPI interface |
+| MCU | ESP32-WROOM-32 | ESP32 with built-in BLE |
+| Display | 3.5" TFT (ST7796) | 320x480 pixels, SPI interface |
 | Sensors | Inkbird IAM-T1 | BLE CO2/temp/humidity monitors (up to 4) |
 
-### Wiring (ESP32-C3 → E-Paper)
+### Wiring (ESP32-WROOM-32 → TFT)
 
-| ESP32-C3 | E-Paper | Function |
-|----------|---------|----------|
-| GPIO 7 | DIN | SPI MOSI |
-| GPIO 6 | CLK | SPI Clock |
-| GPIO 10 | CS | Chip Select |
-| GPIO 1 | DC | Data/Command |
-| GPIO 0 | RST | Reset |
-| GPIO 3 | BUSY | Busy Status |
+| ESP32 | TFT | Function |
+|-------|-----|----------|
+| GPIO 13 | MOSI | SPI MOSI |
+| GPIO 12 | MISO | SPI MISO |
+| GPIO 14 | SCK | SPI Clock |
+| GPIO 15 | CS | Chip Select |
+| GPIO 2 | DC | Data/Command |
+| GPIO 27 | BL | Backlight (active high) |
 | 3.3V | VCC | Power |
 | GND | GND | Ground |
 
@@ -52,7 +52,7 @@ Sensor configuration (MAC addresses and display names) is defined in `src/ble/in
 - **Status indicators** - Visual air quality levels based on CO2 thresholds
 - **Loading screen** - Progress feedback during sensor initialization
 - **Synthetic data mode** - Test UI without physical sensors
-- **Low power display** - E-paper only draws power during refresh
+- **Always-on display** - TFT backlight stays on during use
 
 ## Project Structure
 
@@ -64,7 +64,7 @@ co2_display/
 │   │   ├── inkbird_ble.c/h    # BLE connection & data parsing
 │   │   └── inkbird_config.h   # Sensor MAC addresses & settings
 │   ├── drivers/               # Hardware drivers
-│   │   ├── epd_driver.c/h     # E-paper display driver (SPI)
+│   │   ├── epd_driver.c/h     # TFT display driver (SPI + LVGL)
 │   │   └── gfx.c/h            # Graphics library (fonts, shapes, charts)
 │   ├── ui/                    # User interface
 │   │   └── ui_co2_display.c/h # 2x2 sensor grid layout
@@ -84,16 +84,16 @@ co2_display/
 |--------|---------|
 | `main.c` | Startup sequence, FreeRTOS timers, task orchestration |
 | `ble/` | NimBLE-based client for Inkbird sensors (scan, connect, read, history) |
-| `drivers/` | Low-level hardware: SPI e-paper driver + bitmap graphics library |
+| `drivers/` | Low-level hardware: SPI TFT driver + bitmap graphics library |
 | `ui/` | Display layout: 2x2 grid with CO2 values, status, and mini charts |
 | `data/` | Sensor data storage with ring buffers for history |
 
 ### Startup Sequence
 
-1. **Initialize hardware** - E-paper display, BLE stack
+1. **Initialize hardware** - TFT display, BLE stack
 2. **Show loading screen** - Immediate visual feedback
 3. **Phase 1: Read current values** - Connect to each sensor, get real-time reading
-4. **Phase 2: Display values** - Refresh e-paper with current data
+4. **Phase 2: Display values** - Refresh TFT with current data
 5. **Phase 3: Sync history** - Download stored readings from sensor memory
 6. **Phase 4: Periodic updates** - Start background polling task
 
@@ -130,7 +130,7 @@ Set `USE_SYNTHETIC_DATA` to `true` in `src/main.c` to use generated test data:
 ### Prerequisites
 
 - [PlatformIO](https://platformio.org/) (CLI or IDE)
-- USB cable connected to ESP32-C3
+- USB cable connected to ESP32
 
 ### Commands
 
@@ -227,4 +227,4 @@ See [INKBIRD_IAM_T1_PROTOCOL.md](INKBIRD_IAM_T1_PROTOCOL.md) for detailed BLE pr
 
 - Inkbird IAM-T1 protocol reverse-engineered from Android APK
 - ESP-IDF framework by Espressif
-- Waveshare e-paper driver adapted from official Arduino examples
+- TFT display driver adapted to esp_lcd + LVGL
