@@ -54,8 +54,22 @@ static void lvgl_tick_cb(void *arg)
     lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
+static void rgb565_to_bgr565_swap(uint16_t *buf, uint32_t px_count)
+{
+    for (uint32_t i = 0; i < px_count; i++) {
+        uint16_t px = buf[i];
+        uint16_t r = (px >> 11) & 0x1F;
+        uint16_t g = (px >> 5) & 0x3F;
+        uint16_t b = px & 0x1F;
+        uint16_t bgr = (b << 11) | (g << 5) | r;
+        buf[i] = (bgr >> 8) | (bgr << 8);
+    }
+}
+
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+    uint32_t px_count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    rgb565_to_bgr565_swap((uint16_t *)px_map, px_count);
     epd_draw_bitmap(area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
     lv_display_flush_ready(disp);
 }
@@ -258,13 +272,13 @@ void ui_co2_display_loading(void)
     s_ui_created = false;
 
     lv_obj_t *title = lv_label_create(lv_screen_active());
-    lv_obj_set_style_text_color(title, lv_color_hex(0xEAEAEA), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x333333), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_label_set_text(title, "CO2 Display");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
 
     lv_obj_t *subtitle = lv_label_create(lv_screen_active());
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x9A9A9A), 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x666666), 0);
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
     lv_label_set_text(subtitle, "Connecting to sensors...");
     lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 12);

@@ -1,395 +1,140 @@
-/**
- * @file main.c
- * @brief CO2 Sensor Display - Main Application
- *
- * ESP32 based CO2 sensor display using 2.4" TFT.
- * Displays readings from 4 Inkbird IAM-T1 CO2 sensors via BLE.
- */
-
 #include <stdio.h>
-#include <string.h>
 
 #include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/timers.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 
 #include "lvgl.h"
 
 #include "epd_driver.h"
-#include "sensor_data.h"
-#include "ui_co2_display.h"
-#include "inkbird_ble.h"
 
 static const char *TAG = "main";
 
-// Update intervals
-#define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
-#define DISPLAY_REFRESH_MS      60000   // TFT refresh interval (1 minute)
+#define LVGL_TICK_PERIOD_MS 5
+#define LVGL_BUFFER_LINES 20
 
-// History download configuration
-// Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
-#define DOWNLOAD_HISTORY_ON_STARTUP  true  // Set to false to skip history download
+static lv_display_t *s_display = NULL;
+static lv_color_t *s_buf1 = NULL;
+static lv_color_t *s_buf2 = NULL;
+static esp_timer_handle_t s_tick_timer = NULL;
 
-// FreeRTOS timer handles
-static TimerHandle_t s_sensor_timer = NULL;
-static TimerHandle_t s_refresh_timer = NULL;
-
-// Flag to trigger display refresh
-static volatile bool s_do_refresh = false;
-
-// History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
-static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
-
-/**
- * @brief Download historical data from a sensor
- */
-static void download_sensor_history(uint8_t sensor_idx)
-{
-    if (!inkbird_ble_is_sensor_enabled(sensor_idx)) {
-        return;
-    }
-
-    sensor_data_t *sensor = sensor_data_get(sensor_idx);
-
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Downloading History from Sensor %d", sensor_idx);
-    ESP_LOGI(TAG, "  Name: %s", inkbird_ble_get_sensor_name(sensor_idx));
-    ESP_LOGI(TAG, "========================================");
-
-    uint16_t count = 0;
-    esp_err_t ret = inkbird_ble_download_history(
-        sensor_idx,
-        s_history_records,
-        SENSOR_HISTORY_SIZE,
-        &count
-    );
-
-    // Clear downloading flag
-    if (sensor) {
-        sensor->downloading = false;
-    }
-
-    s_do_refresh = true;
-
-    if (ret == ESP_OK && count > 0) {
-        ESP_LOGI(TAG, "");
-        ESP_LOGI(TAG, ">>> History download SUCCESS: %u records <<<", count);
-
-        // Feed history data into sensor_data module for chart display
-        ESP_LOGI(TAG, "Adding %u records to chart", count);
-
-        // Log first and last records
-        ESP_LOGI(TAG, "  First: CO2=%u ppm, T=%.1f C",
-                 s_history_records[0].co2_ppm,
-                 s_history_records[0].temperature / 10.0f);
-        if (count > 1) {
-            ESP_LOGI(TAG, "  Last:  CO2=%u ppm, T=%.1f C",
-                     s_history_records[count - 1].co2_ppm,
-                     s_history_records[count - 1].temperature / 10.0f);
-        }
-
-        // Feed all records to chart history only (don't update current reading)
-        // Records are already in chronological order (oldest first)
-        for (int i = 0; i < count; i++) {
-            inkbird_history_record_t *hist = &s_history_records[i];
-            // Only add valid CO2 readings to history
-            if (hist->co2_ppm > 0 && hist->co2_ppm < 10000) {
-                sensor_data_add_history(sensor_idx, hist->co2_ppm);
-            }
-        }
-
-        // Mark sensor as connected since we got data
-        if (sensor) {
-            sensor->connected = true;
-        }
-    } else {
-        ESP_LOGW(TAG, ">>> History download FAILED: %s <<<", esp_err_to_name(ret));
-    }
-
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "");
-}
-
-/**
- * @brief Sensor data update timer callback
- *
- * Copies readings from BLE module to sensor_data.
- */
-static void sensor_update_cb(TimerHandle_t timer)
-{
-    (void)timer;
-
-    // Copy readings from BLE module to sensor_data
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        inkbird_reading_t ble_reading = inkbird_ble_get_reading(i);
-
-        if (ble_reading.valid) {
-            sensor_reading_t reading = {
-                .co2_ppm = ble_reading.co2_ppm,
-                .temperature = ble_reading.temperature,
-                .humidity = ble_reading.humidity,
-                .pressure = ble_reading.pressure,
-                .timestamp = ble_reading.timestamp,
-            };
-            sensor_data_update(i, &reading);
-
-            // Update connected status based on staleness
-            sensor_data_t *sensor = sensor_data_get(i);
-            if (sensor) {
-                sensor->connected = !ble_reading.stale;
-            }
-        }
-    }
-
-    s_do_refresh = true;
-    ESP_LOGI(TAG, "Sensor data updated from BLE");
-}
-
-/**
- * @brief Display refresh timer callback
- */
-static void display_refresh_cb(TimerHandle_t timer)
-{
-    (void)timer;
-    s_do_refresh = true;
-}
-
-/**
- * @brief Read initial sensor value with retries
- *
- * Used during startup to get current sensor readings before the
- * periodic polling task begins.
- *
- * @param sensor_idx Sensor index
- * @return true if successfully read, false otherwise
- */
-static bool read_initial_sensor_value(int sensor_idx)
-{
-    for (int attempt = 1; attempt <= INKBIRD_STARTUP_READ_RETRIES; attempt++) {
-        ESP_LOGI(TAG, "Reading sensor %d (%s) - attempt %d/%d",
-                 sensor_idx, inkbird_ble_get_sensor_name(sensor_idx),
-                 attempt, INKBIRD_STARTUP_READ_RETRIES);
-
-        inkbird_reading_t reading;
-        esp_err_t ret = inkbird_ble_read_sensor_once(
-            sensor_idx,
-            INKBIRD_STARTUP_READ_TIMEOUT_MS,
-            &reading);
-
-        if (ret == ESP_OK && reading.valid) {
-            // Copy to sensor_data module using sensor_reading_t
-            sensor_reading_t sensor_reading = {
-                .co2_ppm = reading.co2_ppm,
-                .temperature = reading.temperature,
-                .humidity = reading.humidity,
-                .pressure = reading.pressure,
-                .timestamp = reading.timestamp,
-            };
-            sensor_data_update(sensor_idx, &sensor_reading);
-
-            // Mark as connected
-            sensor_data_t *sensor = sensor_data_get(sensor_idx);
-            if (sensor) {
-                sensor->connected = true;
-            }
-
-            ESP_LOGI(TAG, "Sensor %d: CO2=%d ppm, Temp=%.1f C, Humidity=%.1f%%",
-                     sensor_idx, reading.co2_ppm,
-                     reading.temperature / 10.0f,
-                     reading.humidity / 10.0f);
-            return true;
-        }
-
-        ESP_LOGW(TAG, "Sensor %d read failed (attempt %d): %s",
-                 sensor_idx, attempt, esp_err_to_name(ret));
-
-        if (attempt < INKBIRD_STARTUP_READ_RETRIES) {
-            vTaskDelay(pdMS_TO_TICKS(2000));  // Wait before retry
-        }
-    }
-
-    ESP_LOGE(TAG, "Sensor %d: All %d read attempts failed",
-             sensor_idx, INKBIRD_STARTUP_READ_RETRIES);
-    return false;
-}
-
-/**
- * @brief Display task - handles rendering and display updates
- */
-static void display_task(void *arg)
+static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
+    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+}
 
-    ESP_LOGI(TAG, "Display task started");
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    int64_t last_update_us = 0;
-
-    while (1) {
-        lv_timer_handler();
-
-        int64_t now_us = esp_timer_get_time();
-        if (s_do_refresh || (now_us - last_update_us) >= 500000) {
-            s_do_refresh = false;
-            last_update_us = now_us;
-            ui_co2_display_update();
-            ui_co2_display_force_refresh();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
+static void rgb565_to_bgr565_swap(uint16_t *buf, uint32_t px_count)
+{
+    for (uint32_t i = 0; i < px_count; i++) {
+        uint16_t px = buf[i];
+        uint16_t r = (px >> 11) & 0x1F;
+        uint16_t g = (px >> 5) & 0x3F;
+        uint16_t b = px & 0x1F;
+        uint16_t bgr = (b << 11) | (g << 5) | r;
+        buf[i] = (bgr >> 8) | (bgr << 8);
     }
 }
 
-/**
- * @brief Application entry point
- */
+static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    int w = area->x2 - area->x1 + 1;
+    int h = area->y2 - area->y1 + 1;
+    uint32_t px_count = (uint32_t)w * h;
+    rgb565_to_bgr565_swap((uint16_t *)px_map, px_count);
+    epd_draw_bitmap(area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    lv_display_flush_ready(disp);
+}
+
+static void create_checkerboard(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x808080), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLL_ELASTIC);
+
+    uint32_t colors[4] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00};
+    const char *nums[4] = {"1", "2", "3", "4"};
+    int box_size = 140;
+    int gap = 10;
+    int start_x = (320 - 2 * box_size - gap) / 2;
+    int start_y = (480 - 2 * box_size - gap) / 2;
+
+    for (int i = 0; i < 4; i++) {
+        int row = i / 2;
+        int col = i % 2;
+        int x = start_x + col * (box_size + gap);
+        int y = start_y + row * (box_size + gap);
+
+        lv_obj_t *box = lv_obj_create(screen);
+        lv_obj_set_pos(box, x, y);
+        lv_obj_set_size(box, box_size, box_size);
+        lv_obj_set_style_bg_color(box, lv_color_hex(colors[i]), 0);
+        lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(box, 0, 0);
+        lv_obj_set_style_radius(box, 0, 0);
+        lv_obj_set_style_pad_all(box, 0, 0);
+        lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLL_ELASTIC);
+
+        lv_obj_t *lbl = lv_label_create(box);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
+        lv_label_set_text(lbl, nums[i]);
+        lv_obj_center(lbl);
+    }
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  CO2 Sensor Display");
-    ESP_LOGI(TAG, "  ESP32 + TFT + Inkbird BLE");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "Checkerboard Test");
 
-    ESP_LOGI(TAG, "Initializing TFT display...");
     esp_err_t ret = epd_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "TFT init failed!");
         return;
     }
 
-    // Initialize sensor data module
-    ESP_LOGI(TAG, "Initializing sensor data...");
-    sensor_data_init();
+    lv_init();
 
-    // Set sensor names from BLE configuration
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
-        }
+    s_display = lv_display_create(320, 480);
+    lv_display_set_default(s_display);
+    lv_display_set_color_format(s_display, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(s_display, lvgl_flush_cb);
+
+    size_t buf_size = 320 * LVGL_BUFFER_LINES * sizeof(lv_color_t);
+    s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_buf1 == NULL) {
+        s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DEFAULT);
     }
-
-    // Initialize BLE for Inkbird sensors
-    ESP_LOGI(TAG, "Initializing Bluetooth for Inkbird sensors...");
-    ret = inkbird_ble_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE init failed!");
-        return;
+    s_buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_buf2 == NULL) {
+        s_buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DEFAULT);
     }
+    lv_display_set_buffers(s_display, s_buf1, s_buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    // Initialize UI
-    ESP_LOGI(TAG, "Initializing UI...");
-    ui_co2_display_init();
+    esp_timer_create_args_t tick_args = {
+        .callback = lvgl_tick_cb,
+        .name = "lvgl_tick"
+    };
+    esp_timer_create(&tick_args, &s_tick_timer);
+    esp_timer_start_periodic(s_tick_timer, LVGL_TICK_PERIOD_MS * 1000);
 
-    // Show loading screen immediately
-    ESP_LOGI(TAG, "Showing loading screen...");
-    ui_co2_display_loading();
+    create_checkerboard();
 
-    ESP_LOGI(TAG, "Starting display task...");
-    xTaskCreate(
-        display_task,
-        "display",
-        8192,
-        NULL,
-        5,
-        NULL
-    );
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(s_display);
 
-    // ========== PHASE 1: Read current real-time values ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 1: Reading Current Sensor Values");
-    ESP_LOGI(TAG, "========================================");
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            read_initial_sensor_value(i);
-            vTaskDelay(pdMS_TO_TICKS(1000));  // Brief delay between sensors
-        }
-    }
-
-    // ========== PHASE 2: Render display with current values ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 2: Displaying Current Values");
-    ESP_LOGI(TAG, "========================================");
-    s_do_refresh = true;
-
-#if DOWNLOAD_HISTORY_ON_STARTUP
-    // ========== PHASE 3: Download historical data ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 3: Syncing Historical Data");
-    ESP_LOGI(TAG, "========================================");
-
-    // Wait for any pending BLE operations to complete before starting history download
-    // This ensures the connection from Phase 1 is fully closed
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    // Mark sensors as downloading (for internal state tracking)
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_t *sensor = sensor_data_get(i);
-            if (sensor) {
-                sensor->downloading = true;
-            }
-        }
-    }
-
-    s_do_refresh = true;
-
-    // Download history from each sensor
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            download_sensor_history(i);
-            vTaskDelay(pdMS_TO_TICKS(2000));  // Delay between sensors
-        }
-    }
-
-    // Final display refresh with history charts
-    ESP_LOGI(TAG, "Refreshing display with history charts...");
-    s_do_refresh = true;
-#endif
-
-    // ========== PHASE 4: Start periodic BLE reading ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 4: Starting Periodic Updates");
-    ESP_LOGI(TAG, "========================================");
-    inkbird_ble_start();
-
-    // Create sensor update timer
-    s_sensor_timer = xTimerCreate(
-        "sensor_update",
-        pdMS_TO_TICKS(SENSOR_UPDATE_MS),
-        pdTRUE,  // Auto-reload
-        NULL,
-        sensor_update_cb
-    );
-    xTimerStart(s_sensor_timer, 0);
-
-    // Create display refresh timer
-    s_refresh_timer = xTimerCreate(
-        "display_refresh",
-        pdMS_TO_TICKS(DISPLAY_REFRESH_MS),
-        pdTRUE,  // Auto-reload
-        NULL,
-        display_refresh_cb
-    );
-    xTimerStart(s_refresh_timer, 0);
-
-    ESP_LOGI(TAG, "Initialization complete!");
-    ESP_LOGI(TAG, "Display will refresh every %d seconds", DISPLAY_REFRESH_MS / 1000);
-
-    // Main task can sleep
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

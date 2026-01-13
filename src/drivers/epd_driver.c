@@ -60,7 +60,7 @@ static esp_err_t lcd_spi_init(void)
         .sclk_io_num = EPD_PIN_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = (EPD_WIDTH * LCD_DRAW_BUF_LINES * sizeof(uint16_t)) + 8,
+        .max_transfer_sz = EPD_WIDTH * EPD_HEIGHT * sizeof(uint16_t),
     };
 
     return spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
