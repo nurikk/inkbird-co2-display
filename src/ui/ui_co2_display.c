@@ -25,13 +25,14 @@
 #define CHART_MIN_PPM 400
 #define CHART_MAX_PPM 2000
 #define LVGL_TICK_PERIOD_MS 5
-#define LVGL_BUFFER_LINES 80
+#define LVGL_BUFFER_LINES 20
 
 
 static const char *TAG = "ui";
 
 static lv_display_t *s_display = NULL;
 static lv_color_t *s_buf1 = NULL;
+static lv_color_t *s_buf2 = NULL;
 static uint8_t *s_rotate_buf = NULL;
 static esp_timer_handle_t s_tick_timer = NULL;
 
@@ -244,7 +245,16 @@ void ui_co2_display_init(void)
         return;
     }
 
-    lv_display_set_buffers(s_display, s_buf1, NULL, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    s_buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_buf2 == NULL) {
+        s_buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DEFAULT);
+    }
+    if (s_buf2 == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate LVGL second buffer");
+        return;
+    }
+
+    lv_display_set_buffers(s_display, s_buf1, s_buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     s_rotate_buf = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (s_rotate_buf == NULL) {
@@ -268,16 +278,19 @@ void ui_co2_display_init(void)
 
 void ui_co2_display_loading(void)
 {
-    lv_obj_clean(lv_screen_active());
+    lv_obj_t *screen = lv_screen_active();
+    lv_obj_clean(screen);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     s_ui_created = false;
 
-    lv_obj_t *title = lv_label_create(lv_screen_active());
+    lv_obj_t *title = lv_label_create(screen);
     lv_obj_set_style_text_color(title, lv_color_hex(0x333333), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_label_set_text(title, "CO2 Display");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
 
-    lv_obj_t *subtitle = lv_label_create(lv_screen_active());
+    lv_obj_t *subtitle = lv_label_create(screen);
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0x666666), 0);
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
     lv_label_set_text(subtitle, "Connecting to sensors...");
