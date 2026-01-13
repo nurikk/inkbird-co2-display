@@ -207,6 +207,23 @@ When making code changes to this project:
 - **Be proactive**: The user expects the agent to complete the full workflow (edit → build → upload → monitor) in one go.
 - **Handle errors autonomously**: If upload fails, check common issues and retry. If build fails, fix the errors and try again.
 
+## Troubleshooting Tools
+
+### Device Photo Capture
+
+To take a photo of the physical device display for visual troubleshooting:
+
+```bash
+imagesnap -d "FaceTime HD Camera"  photo.jpg
+```
+
+This captures a single frame from the Mac's camera (macOS). Use this when:
+- Debugging TFT display output issues
+- Documenting visual bugs or UI problems
+- Verifying the physical display matches expected rendering
+
+The captured image can then be analyzed to diagnose rendering issues, layout problems, or unexpected visual behavior on the device.
+
 ## Common Issues
 
 1. **Build fails after SDK config change**: Run `pio run -t fullclean`

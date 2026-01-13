@@ -25,6 +25,8 @@ void ui_co2_display_update(void);
  */
 void ui_co2_display_loading(void);
 
+void ui_co2_display_force_refresh(void);
+
 #ifdef __cplusplus
 }
 #endif

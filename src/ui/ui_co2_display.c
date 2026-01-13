@@ -1,203 +1,366 @@
-/**
- * @file ui_co2_display.c
- * @brief CO2 display UI using direct framebuffer rendering
- *
- * Layout (240x320 pixels):
- * ┌───────────────────┬───────────────────┐
- * │     Sensor 1      │     Sensor 2      │
- * │     (159x119)     │     (159x119)     │
- * ├───────────────────┼───────────────────┤
- * │     Sensor 3      │     Sensor 4      │
- * │     (159x119)     │     (159x119)     │
- * └───────────────────┴───────────────────┘
- */
-
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 
-#include "ui_co2_display.h"
-#include "sensor_data.h"
+#include "sdkconfig.h"
+
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#include "lvgl.h"
+
 #include "epd_driver.h"
-#include "gfx.h"
+#include "sensor_data.h"
+#include "ui_co2_display.h"
 
-// Display dimensions
-#define DISPLAY_WIDTH   EPD_WIDTH
-#define DISPLAY_HEIGHT  EPD_HEIGHT
+#define GRID_COLS 2
+#define GRID_ROWS 2
+#define GRID_GAP 4
+#define TILE_PAD 8
+#define CHART_HEIGHT 64
+#define HEADER_HEIGHT 24
+#define STATUS_PAD_X 6
+#define STATUS_PAD_Y 2
+#define CHART_MIN_PPM 400
+#define CHART_MAX_PPM 2000
+#define LVGL_TICK_PERIOD_MS 5
+#define LVGL_BUFFER_LINES 80
 
-// Grid configuration
-#define GRID_COLS       2
-#define GRID_ROWS       2
-#define GRID_GAP        2
 
-// Tile dimensions
-#define TILE_WIDTH      ((DISPLAY_WIDTH - GRID_GAP) / GRID_COLS)
-#define TILE_HEIGHT     ((DISPLAY_HEIGHT - GRID_GAP) / GRID_ROWS)
+static const char *TAG = "ui";
 
-// Padding inside tiles
-#define TILE_PAD        4
+static lv_display_t *s_display = NULL;
+static lv_color_t *s_buf1 = NULL;
+static uint8_t *s_rotate_buf = NULL;
+static esp_timer_handle_t s_tick_timer = NULL;
 
-// Chart Y-axis range (fixed scale for consistent visualization)
-#define CHART_MIN_PPM   400
-#define CHART_MAX_PPM   2000
+static lv_obj_t *s_tiles[SENSOR_COUNT];
+static lv_obj_t *s_name_labels[SENSOR_COUNT];
+static lv_obj_t *s_status_labels[SENSOR_COUNT];
+static lv_obj_t *s_co2_labels[SENSOR_COUNT];
+static lv_obj_t *s_unit_labels[SENSOR_COUNT];
+static lv_obj_t *s_temp_labels[SENSOR_COUNT];
+static lv_obj_t *s_hum_labels[SENSOR_COUNT];
+static lv_obj_t *s_chart[SENSOR_COUNT];
+static lv_obj_t *s_chart_labels[SENSOR_COUNT];
+static lv_chart_series_t *s_chart_series[SENSOR_COUNT];
+static int32_t s_chart_data[SENSOR_COUNT][SENSOR_HISTORY_SIZE];
+static bool s_ui_created = false;
 
-/**
- * @brief Draw a mini chart of CO2 history
- *
- * Y-axis is clamped between CHART_MIN_PPM and CHART_MAX_PPM for consistent
- * visualization across all sensors. Values outside this range are clipped
- * to the chart boundaries.
- */
-static void draw_chart(int x, int y, int w, int h, const int16_t *data, int count)
+static void lvgl_tick_cb(void *arg)
 {
-    if (count < 2) return;
-    
-    // Use fixed scale for Y-axis (400-2000 ppm)
-    const int16_t min_val = CHART_MIN_PPM;
-    const int16_t max_val = CHART_MAX_PPM;
-    const int16_t range = max_val - min_val;
-    
-    // Draw border
-    gfx_draw_rect(x, y, w, h, true);
-    
-    // Draw data points as connected lines
-    int chart_x = x + 1;
-    int chart_y = y + 1;
-    int chart_w = w - 2;
-    int chart_h = h - 2;
-    
-    int prev_px = 0, prev_py = 0;
-    for (int i = 0; i < count; i++) {
-        // Clamp data value to chart range
-        int16_t val = data[i];
-        if (val < min_val) val = min_val;
-        if (val > max_val) val = max_val;
-        
-        int px = chart_x + (i * chart_w) / (count - 1);
-        int py = chart_y + chart_h - 1 - ((val - min_val) * (chart_h - 1)) / range;
-        
-        if (i > 0) {
-            gfx_draw_line(prev_px, prev_py, px, py, true);
-        }
-        prev_px = px;
-        prev_py = py;
+    (void)arg;
+    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+}
+
+static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    epd_draw_bitmap(area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    lv_display_flush_ready(disp);
+}
+
+static lv_color_t status_color(co2_status_t status)
+{
+    switch (status) {
+    case CO2_STATUS_GOOD:
+        return lv_color_hex(0x3BAA6B);
+    case CO2_STATUS_MODERATE:
+        return lv_color_hex(0xE0B23F);
+    case CO2_STATUS_WARNING:
+        return lv_color_hex(0xE08A3A);
+    case CO2_STATUS_ALERT:
+        return lv_color_hex(0xE04B4B);
+    default:
+        return lv_color_hex(0x7F8C8D);
     }
 }
 
-/**
- * @brief Draw a single sensor tile
- */
-static void draw_sensor_tile(int tile_x, int tile_y, int tile_w, int tile_h, int sensor_idx)
+static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int tile_h)
 {
-    sensor_data_t *sensor = sensor_data_get(sensor_idx);
-    if (sensor == NULL) return;
-    
-    // Draw tile border
-    gfx_draw_rect(tile_x, tile_y, tile_w, tile_h, true);
-    
-    int x = tile_x + TILE_PAD;
-    int y = tile_y + TILE_PAD;
-    int w = tile_w - TILE_PAD * 2;
-    
-    // Row 1: Sensor name and status
-    gfx_draw_string(x, y, sensor->name, GFX_FONT_SMALL, true);
-    
-    // Status indicator on right
-    co2_status_t status = sensor_data_get_co2_status(sensor->current.co2_ppm);
-    const char *status_text = sensor_data_get_status_text(status);
-    gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, status_text, GFX_FONT_SMALL, true);
-    
-    y += 12;
-    
-    // Row 2: CO2 value (large)
-    if (sensor->connected) {
-        char co2_str[16];
-        snprintf(co2_str, sizeof(co2_str), "%d", sensor->current.co2_ppm);
-        
-        // Center the CO2 value
-        int co2_width = gfx_string_width(co2_str, GFX_FONT_XLARGE);
-        int unit_width = gfx_string_width(" ppm", GFX_FONT_SMALL);
-        int total_width = co2_width + unit_width;
-        int start_x = x + (w - total_width) / 2;
-        
-        gfx_draw_string(start_x, y, co2_str, GFX_FONT_XLARGE, true);
-        gfx_draw_string(start_x + co2_width, y + 20, " ppm", GFX_FONT_SMALL, true);
-    } else {
-        gfx_draw_string(x + w/2 - 16, y + 10, "----", GFX_FONT_MEDIUM, true);
+    lv_obj_t *tile = lv_obj_create(lv_screen_active());
+    lv_obj_set_pos(tile, tile_x, tile_y);
+    lv_obj_set_size(tile, tile_w, tile_h);
+    lv_obj_set_style_radius(tile, 10, 0);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(0xF0F0F0), 0);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(tile, 1, 0);
+    lv_obj_set_style_border_color(tile, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_pad_all(tile, TILE_PAD, 0);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_tiles[index] = tile;
+
+    lv_obj_t *header = lv_obj_create(tile);
+    lv_obj_set_size(header, tile_w - (TILE_PAD * 2), HEADER_HEIGHT);
+    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *name = lv_label_create(header);
+    lv_obj_set_style_text_color(name, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_16, 0);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(name, tile_w - (TILE_PAD * 2) - 70);
+    lv_label_set_text(name, "Sensor");
+    s_name_labels[index] = name;
+
+    lv_obj_t *status = lv_label_create(header);
+    lv_label_set_text(status, "----");
+    lv_obj_set_style_text_color(status, lv_color_hex(0x0B0B0B), 0);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(status, lv_color_hex(0x6F7C86), 0);
+    lv_obj_set_style_bg_opa(status, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(status, 8, 0);
+    lv_obj_set_style_pad_left(status, STATUS_PAD_X, 0);
+    lv_obj_set_style_pad_right(status, STATUS_PAD_X, 0);
+    lv_obj_set_style_pad_top(status, STATUS_PAD_Y, 0);
+    lv_obj_set_style_pad_bottom(status, STATUS_PAD_Y, 0);
+    s_status_labels[index] = status;
+
+    lv_obj_t *co2 = lv_label_create(tile);
+    lv_obj_set_style_text_color(co2, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_text_font(co2, &lv_font_montserrat_28, 0);
+    lv_label_set_text(co2, "----");
+    lv_obj_align(co2, LV_ALIGN_CENTER, 0, -10);
+    s_co2_labels[index] = co2;
+
+    lv_obj_t *unit = lv_label_create(tile);
+    lv_obj_set_style_text_color(unit, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_font(unit, &lv_font_montserrat_14, 0);
+    lv_label_set_text(unit, "ppm");
+    lv_obj_align(unit, LV_ALIGN_CENTER, 0, 16);
+    s_unit_labels[index] = unit;
+
+    lv_obj_t *temp = lv_label_create(tile);
+    lv_obj_set_style_text_color(temp, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_font(temp, &lv_font_montserrat_14, 0);
+    lv_label_set_text(temp, "--.-C");
+    lv_obj_align(temp, LV_ALIGN_BOTTOM_LEFT, 0, -(CHART_HEIGHT + 4));
+    s_temp_labels[index] = temp;
+
+    lv_obj_t *hum = lv_label_create(tile);
+    lv_obj_set_style_text_color(hum, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_font(hum, &lv_font_montserrat_14, 0);
+    lv_label_set_text(hum, "--%" );
+    lv_obj_align(hum, LV_ALIGN_BOTTOM_RIGHT, 0, -(CHART_HEIGHT + 4));
+    s_hum_labels[index] = hum;
+
+    lv_obj_t *chart = lv_chart_create(tile);
+    lv_obj_set_size(chart, tile_w - (TILE_PAD * 2), CHART_HEIGHT);
+    lv_obj_align(chart, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(chart, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(chart, 6, 0);
+    lv_obj_set_style_border_width(chart, 0, 0);
+    lv_obj_set_style_pad_all(chart, 2, 0);
+    lv_obj_set_style_line_width(chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_line_color(chart, lv_color_hex(0xCCCCCC), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(chart, LV_OPA_40, LV_PART_MAIN);
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart, SENSOR_HISTORY_SIZE);
+    lv_chart_set_div_line_count(chart, 2, 0);
+    lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, CHART_MIN_PPM, CHART_MAX_PPM);
+    lv_obj_clear_flag(chart, LV_OBJ_FLAG_SCROLLABLE);
+    s_chart[index] = chart;
+
+    s_chart_series[index] = lv_chart_add_series(chart, lv_color_hex(0x2ECC71), LV_CHART_AXIS_PRIMARY_Y);
+
+    lv_obj_t *chart_label = lv_label_create(chart);
+    lv_obj_set_style_text_color(chart_label, lv_color_hex(0x9A9A9A), 0);
+    lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(chart_label, "No history");
+    lv_obj_center(chart_label);
+    s_chart_labels[index] = chart_label;
+}
+
+static void create_ui(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    int tile_w = (320 - GRID_GAP) / GRID_COLS;
+    int tile_h = (480 - GRID_GAP) / GRID_ROWS;
+
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        int col = i % GRID_COLS;
+        int row = i / GRID_COLS;
+        int tile_x = col * (tile_w + GRID_GAP);
+        int tile_y = row * (tile_h + GRID_GAP);
+        create_tile(i, tile_x, tile_y, tile_w, tile_h);
     }
-    
-    y += 38;
-    
-    // Row 3: Temperature and humidity
-    if (sensor->connected) {
-        char temp_str[24];
-        char hum_str[24];
-        
-        // Temperature (value is in 0.1C units)
-        int temp_whole = sensor->current.temperature / 10;
-        int temp_frac = sensor->current.temperature % 10;
-        if (temp_frac < 0) temp_frac = -temp_frac;
-        snprintf(temp_str, sizeof(temp_str), "%d.%dC", temp_whole, temp_frac);
-        
-        // Humidity (value is in 0.1% units)  
-        int hum_whole = sensor->current.humidity / 10;
-        snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
-        
-        gfx_draw_string(x, y, temp_str, GFX_FONT_MEDIUM, true);
-        gfx_draw_string_right(tile_x + tile_w - TILE_PAD, y, hum_str, GFX_FONT_MEDIUM, true);
-    }
-    
-    y += 18;
-    
-    // Row 4: History chart or downloading message
-    int chart_h = tile_h - (y - tile_y) - TILE_PAD;
-    
-    if (sensor->downloading) {
-        // Show downloading message in chart area
-        gfx_draw_rect(x, y, w, chart_h, true);
-        gfx_draw_string(x + w/2 - 40, y + chart_h/2 - 4, "Downloading...", GFX_FONT_SMALL, true);
-    } else {
-        uint8_t history_count;
-        const int16_t *history = sensor_data_get_co2_history(sensor_idx, &history_count);
-        
-        if (chart_h > 10 && history_count > 1) {
-            draw_chart(x, y, w, chart_h, history, history_count);
-        } else {
-            // No history yet - draw empty chart area with message
-            gfx_draw_rect(x, y, w, chart_h, true);
-            gfx_draw_string(x + w/2 - 30, y + chart_h/2 - 4, "No history", GFX_FONT_SMALL, true);
-        }
-    }
+
+    s_ui_created = true;
 }
 
 void ui_co2_display_init(void)
 {
-    // Initialize graphics with framebuffer
-    gfx_init(epd_get_framebuffer(), DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_init();
+
+    s_display = lv_display_create(320, 480);
+    lv_display_set_default(s_display);
+    lv_display_set_color_format(s_display, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(s_display, lvgl_flush_cb);
+    lv_display_set_rotation(s_display, LV_DISPLAY_ROTATION_0);
+
+    lv_theme_t *theme = lv_theme_default_init(
+        s_display,
+        lv_color_hex(0x1E1E1E),
+        lv_color_hex(0x2A2A2A),
+        true,
+        &lv_font_montserrat_14
+    );
+    lv_display_set_theme(s_display, theme);
+
+    size_t buf_pixels = 320 * LVGL_BUFFER_LINES;
+    size_t buf_size = buf_pixels * sizeof(lv_color_t);
+
+    s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_buf1 == NULL) {
+        s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DEFAULT);
+    }
+    if (s_buf1 == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffer");
+        return;
+    }
+
+    lv_display_set_buffers(s_display, s_buf1, NULL, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    s_rotate_buf = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (s_rotate_buf == NULL) {
+        s_rotate_buf = heap_caps_malloc(buf_size, MALLOC_CAP_DEFAULT);
+    }
+    if (s_rotate_buf == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate rotation buffer");
+        return;
+    }
+
+    esp_timer_create_args_t tick_args = {
+        .callback = lvgl_tick_cb,
+        .name = "lvgl_tick"
+    };
+    if (esp_timer_create(&tick_args, &s_tick_timer) == ESP_OK) {
+        esp_timer_start_periodic(s_tick_timer, LVGL_TICK_PERIOD_MS * 1000);
+    } else {
+        ESP_LOGE(TAG, "Failed to start LVGL tick timer");
+    }
 }
 
 void ui_co2_display_loading(void)
 {
-    // Clear screen to white
-    gfx_fill(false);
-    
-    // Draw centered loading message
-    gfx_draw_string_centered(DISPLAY_HEIGHT / 2 - 20, "CO2 Display", GFX_FONT_LARGE, true);
-    gfx_draw_string_centered(DISPLAY_HEIGHT / 2 + 16, "Connecting to sensors...", GFX_FONT_SMALL, true);
+    lv_obj_clean(lv_screen_active());
+    s_ui_created = false;
+
+    lv_obj_t *title = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_color(title, lv_color_hex(0xEAEAEA), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_label_set_text(title, "CO2 Display");
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
+
+    lv_obj_t *subtitle = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x9A9A9A), 0);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
+    lv_label_set_text(subtitle, "Connecting to sensors...");
+    lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 12);
 }
 
 void ui_co2_display_update(void)
 {
-    // Clear screen to white
-    gfx_fill(false);
-    
-    // Draw 2x2 grid of sensor tiles
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        int col = i % GRID_COLS;
-        int row = i / GRID_COLS;
-        
-        int tile_x = col * (TILE_WIDTH + GRID_GAP);
-        int tile_y = row * (TILE_HEIGHT + GRID_GAP);
-        
-        draw_sensor_tile(tile_x, tile_y, TILE_WIDTH, TILE_HEIGHT, i);
+    if (!s_ui_created) {
+        create_ui();
     }
+
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        sensor_data_t *sensor = sensor_data_get(i);
+        if (sensor == NULL) {
+            continue;
+        }
+
+        lv_label_set_text(s_name_labels[i], sensor->name);
+
+        co2_status_t status = sensor_data_get_co2_status(sensor->current.co2_ppm);
+        const char *status_text = sensor_data_get_status_text(status);
+        lv_color_t status_col = status_color(status);
+
+        lv_label_set_text(s_status_labels[i], status_text);
+        lv_obj_set_style_text_color(s_status_labels[i], lv_color_hex(0x0B0B0B), 0);
+        lv_obj_set_style_bg_color(s_status_labels[i], status_col, 0);
+        lv_obj_set_style_border_color(s_tiles[i], status_col, 0);
+        lv_chart_set_series_color(s_chart[i], s_chart_series[i], status_col);
+
+        if (sensor->connected) {
+            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(0xCFCFCF), 0);
+            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(0xCFCFCF), 0);
+            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(0xCFCFCF), 0);
+
+            char co2_str[16];
+            snprintf(co2_str, sizeof(co2_str), "%u", sensor->current.co2_ppm);
+            lv_label_set_text(s_co2_labels[i], co2_str);
+
+            int temp_whole = sensor->current.temperature / 10;
+            int temp_frac = sensor->current.temperature % 10;
+            if (temp_frac < 0) {
+                temp_frac = -temp_frac;
+            }
+            char temp_str[24];
+            snprintf(temp_str, sizeof(temp_str), "%d.%dC", temp_whole, temp_frac);
+            lv_label_set_text(s_temp_labels[i], temp_str);
+
+            int hum_whole = sensor->current.humidity / 10;
+            char hum_str[16];
+            snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
+            lv_label_set_text(s_hum_labels[i], hum_str);
+        } else {
+            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(0x7A7A7A), 0);
+            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(0x7A7A7A), 0);
+            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(0x7A7A7A), 0);
+            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(0x7A7A7A), 0);
+            lv_label_set_text(s_co2_labels[i], "----");
+            lv_label_set_text(s_temp_labels[i], "--.-C");
+            lv_label_set_text(s_hum_labels[i], "--%");
+        }
+
+        if (sensor->downloading) {
+            lv_label_set_text(s_chart_labels[i], "Downloading...");
+            lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
+        uint8_t history_count = 0;
+        const int16_t *history = sensor_data_get_co2_history(i, &history_count);
+        if (history_count > 1 && history != NULL) {
+            for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+                s_chart_data[i][j] = history[j];
+            }
+            lv_chart_set_series_values(s_chart[i], s_chart_series[i], s_chart_data[i], SENSOR_HISTORY_SIZE);
+            lv_obj_add_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text(s_chart_labels[i], "No history");
+            lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void ui_co2_display_force_refresh(void)
+{
+    if (s_display == NULL) {
+        return;
+    }
+
+    lv_obj_t *screen = lv_screen_active();
+    if (screen != NULL) {
+        lv_obj_invalidate(screen);
+    }
+
+    lv_refr_now(s_display);
 }

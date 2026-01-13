@@ -21,11 +21,16 @@ extern "C" {
 #define SCREEN_ROTATE 0
 #endif
 
+#if (SCREEN_ROTATE == 1 || SCREEN_ROTATE == 3)
+#define EPD_WIDTH   SCREEN_HEIGHT
+#define EPD_HEIGHT  SCREEN_WIDTH
+#else
 #define EPD_WIDTH   SCREEN_WIDTH
 #define EPD_HEIGHT  SCREEN_HEIGHT
+#endif
 
 #ifndef PANEL_BGR
-#define PANEL_BGR 1
+#define PANEL_BGR 0
 #endif
 
 #ifndef PANEL_INVERT_COLOR
@@ -50,14 +55,8 @@ extern "C" {
  */
 esp_err_t epd_init(void);
 
-/**
- * @brief Trigger a full display refresh
- */
-void epd_refresh(void);
+esp_err_t epd_draw_bitmap(int x_start, int y_start, int x_end, int y_end, const void *color_data);
 
-/**
- * @brief Clear the display to white
- */
 void epd_clear(void);
 
 /**
@@ -75,12 +74,6 @@ void epd_wake(void);
  * @return true if busy, false if idle
  */
 bool epd_is_busy(void);
-
-/**
- * @brief Get pointer to framebuffer for direct drawing
- * @return Pointer to framebuffer (1 byte per pixel, 0=white, 1=black)
- */
-uint8_t *epd_get_framebuffer(void);
 
 #ifdef __cplusplus
 }

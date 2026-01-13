@@ -1,8 +1,7 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
-#include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,7 +22,7 @@ static const char *TAG = "display";
 
 #define LCD_SPI_HOST         SPI2_HOST
 #define LCD_PIXEL_CLOCK_HZ   (8000000)
-#define LCD_DRAW_BUF_LINES   40
+#define LCD_DRAW_BUF_LINES   80
 
 #define ST7796_CMD_MADCTL    0x36
 #define ST7796_MADCTL_MY     0x80
@@ -34,33 +33,7 @@ static const char *TAG = "display";
 
 static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
-static uint8_t *s_framebuffer = NULL;
-static size_t s_fb_stride_bytes = 0;
-static uint16_t *s_line_buffer = NULL;
-
-static esp_err_t flush_framebuffer(void)
-{
-    if (s_panel_handle == NULL || s_framebuffer == NULL || s_line_buffer == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    for (int y = 0; y < EPD_HEIGHT; y++) {
-        const uint8_t *row = s_framebuffer + (y * s_fb_stride_bytes);
-        for (int x = 0; x < EPD_WIDTH; x++) {
-            uint8_t byte = row[x >> 3];
-            uint8_t mask = 0x80 >> (x & 0x07);
-            s_line_buffer[x] = (byte & mask) ? 0x0000 : 0xFFFF;
-        }
-
-        esp_err_t ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, EPD_WIDTH, y + 1, s_line_buffer);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Draw bitmap failed at line %d: %s", y, esp_err_to_name(ret));
-            return ret;
-        }
-    }
-
-    return ESP_OK;
-}
+static uint16_t *s_clear_line = NULL;
 
 static void backlight_init(void)
 {
@@ -109,7 +82,8 @@ static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
         { .cmd = 0x11, .delay_ms = 120 },
         { .cmd = 0xF0, .data = { 0xC3 }, .data_bytes = 1 },
         { .cmd = 0xF0, .data = { 0x96 }, .data_bytes = 1 },
-        { .cmd = 0x36, .data = { 0x48 }, .data_bytes = 1 },
+
+        { .cmd = 0x36, .data = { 0x80 }, .data_bytes = 1 },
         { .cmd = 0x3A, .data = { 0x55 }, .data_bytes = 1 },
         { .cmd = 0xB4, .data = { 0x01 }, .data_bytes = 1 },
         { .cmd = 0xB6, .data = { 0x80, 0x02, 0x3B }, .data_bytes = 3 },
@@ -149,25 +123,9 @@ static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
     return ESP_OK;
 }
 
-static esp_err_t panel_apply_rotation(void)
+static esp_err_t panel_set_madctl(uint8_t madctl)
 {
-    uint8_t madctl = PANEL_BGR ? ST7796_MADCTL_BGR : ST7796_MADCTL_RGB;
-
-    switch (SCREEN_ROTATE) {
-    case 1:
-        madctl |= ST7796_MADCTL_MV;
-        break;
-    case 2:
-        madctl |= ST7796_MADCTL_MY;
-        break;
-    case 3:
-        madctl |= ST7796_MADCTL_MX | ST7796_MADCTL_MY | ST7796_MADCTL_MV;
-        break;
-    default:
-        madctl |= ST7796_MADCTL_MX;
-        break;
-    }
-
+    ESP_LOGI(TAG, "Setting MADCTL to 0x%02X", madctl);
     return esp_lcd_panel_io_tx_param(s_io_handle, ST7796_CMD_MADCTL, &madctl, 1);
 }
 
@@ -203,56 +161,55 @@ esp_err_t epd_init(void)
                         "Panel init failed");
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel_handle), TAG, "Panel reset failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel_handle), TAG, "Panel ESP init failed");
     ESP_RETURN_ON_ERROR(panel_init_st7796(s_io_handle), TAG, "ST7796 init failed");
     if (PANEL_INVERT_COLOR) {
         ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel_handle, true), TAG, "Panel invert failed");
     }
-    ESP_RETURN_ON_ERROR(panel_apply_rotation(), TAG, "Panel rotation failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel_handle, true), TAG, "Panel on failed");
 
     backlight_init();
 
-    s_fb_stride_bytes = (EPD_WIDTH + 7) / 8;
-    size_t framebuffer_size = s_fb_stride_bytes * EPD_HEIGHT;
-    s_framebuffer = heap_caps_malloc(framebuffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_framebuffer == NULL) {
-        s_framebuffer = heap_caps_malloc(framebuffer_size, MALLOC_CAP_DEFAULT);
-    }
-    if (s_framebuffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate framebuffer");
-        return ESP_ERR_NO_MEM;
-    }
-    memset(s_framebuffer, 0, framebuffer_size);
-
     size_t line_buf_size = EPD_WIDTH * sizeof(uint16_t);
-    s_line_buffer = heap_caps_malloc(line_buf_size, MALLOC_CAP_DMA);
-    if (s_line_buffer == NULL) {
-        s_line_buffer = heap_caps_malloc(line_buf_size, MALLOC_CAP_DEFAULT);
+    s_clear_line = heap_caps_malloc(line_buf_size, MALLOC_CAP_DMA);
+    if (s_clear_line == NULL) {
+        s_clear_line = heap_caps_malloc(line_buf_size, MALLOC_CAP_DEFAULT);
     }
-    if (s_line_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate line buffer");
+    if (s_clear_line == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate clear line buffer");
         return ESP_ERR_NO_MEM;
+    }
+
+    for (int x = 0; x < EPD_WIDTH; x++) {
+        s_clear_line[x] = 0x0000;
     }
 
     ESP_LOGI(TAG, "TFT display initialized (%dx%d)", EPD_WIDTH, EPD_HEIGHT);
     return ESP_OK;
 }
 
-void epd_refresh(void)
+esp_err_t epd_draw_bitmap(int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
-    esp_err_t ret = flush_framebuffer();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Display refresh failed: %s", esp_err_to_name(ret));
+    if (s_panel_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
     }
+
+    return esp_lcd_panel_draw_bitmap(s_panel_handle, x_start, y_start, x_end, y_end, color_data);
 }
 
 void epd_clear(void)
 {
-    if (s_framebuffer == NULL) {
+    if (s_panel_handle == NULL || s_clear_line == NULL) {
         return;
     }
 
-    memset(s_framebuffer, 0, EPD_WIDTH * EPD_HEIGHT);
+    for (int y = 0; y < EPD_HEIGHT; y++) {
+        esp_err_t ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, EPD_WIDTH, y + 1, s_clear_line);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Display clear failed at line %d: %s", y, esp_err_to_name(ret));
+            return;
+        }
+    }
 }
 
 bool epd_is_busy(void)
@@ -274,7 +231,3 @@ void epd_wake(void)
     }
 }
 
-uint8_t *epd_get_framebuffer(void)
-{
-    return s_framebuffer;
-}
