@@ -100,6 +100,8 @@ const char *sensor_data_get_status_text(co2_status_t status)
             return "[!]";
         case CO2_STATUS_ALERT:
             return "[!!!]";
+        case CO2_STATUS_OFFLINE:
+            return "[OFF]";
         default:
             return "[?]";
     }

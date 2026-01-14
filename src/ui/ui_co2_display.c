@@ -97,6 +97,7 @@ static lv_color_t status_color(co2_status_t status)
         return lv_color_hex(COLOR_WARNING);
     case CO2_STATUS_ALERT:
         return lv_color_hex(COLOR_ALERT);
+    case CO2_STATUS_OFFLINE:
     default:
         return lv_color_hex(COLOR_OFFLINE);
     }
@@ -324,7 +325,7 @@ void ui_co2_display_update(void)
 
         lv_label_set_text(s_name_labels[i], sensor->name);
 
-        co2_status_t status = sensor_data_get_co2_status(sensor->current.co2_ppm);
+        co2_status_t status = sensor->connected ? sensor_data_get_co2_status(sensor->current.co2_ppm) : CO2_STATUS_OFFLINE;
         const char *status_text = sensor_data_get_status_text(status);
         lv_color_t status_col = status_color(status);
 

@@ -34,7 +34,8 @@ typedef enum {
     CO2_STATUS_GOOD,      // < 800 ppm - excellent air quality
     CO2_STATUS_MODERATE,  // 800-1000 ppm - acceptable
     CO2_STATUS_WARNING,   // 1000-1400 ppm - ventilation recommended
-    CO2_STATUS_ALERT      // > 1400 ppm - poor air quality, ventilate!
+    CO2_STATUS_ALERT,     // > 1400 ppm - poor air quality, ventilate!
+    CO2_STATUS_OFFLINE    // sensor not connected
 } co2_status_t;
 
 /**
