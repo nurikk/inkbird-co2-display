@@ -62,6 +62,7 @@ typedef struct {
     bool downloading;                           // True while downloading history
     uint16_t download_expected;                 // Expected record count for download
     uint16_t download_received;                 // Received record count for download
+    char status_text[24];                       // Current status (e.g., "Connecting...", "Reading...")
 } sensor_data_t;
 
 /**
@@ -133,6 +134,14 @@ const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count);
  * @param name New sensor name (max 15 chars)
  */
 void sensor_data_set_name(uint8_t index, const char *name);
+
+/**
+ * @brief Set sensor status text
+ *
+ * @param index Sensor index (0-3)
+ * @param status Status text to display (max 23 chars)
+ */
+void sensor_data_set_status(uint8_t index, const char *status);
 
 #ifdef __cplusplus
 }

@@ -26,6 +26,7 @@
 
 #include "inkbird_ble.h"
 #include "inkbird_config.h"
+#include "sensor_data.h"
 
 static const char *TAG = "inkbird_ble";
 
@@ -681,11 +682,13 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             if (param->open.status != ESP_GATT_OK) {
                 ESP_LOGW(TAG, "Open failed, status: %d", param->open.status);
                 s_connected = false;
+                sensor_data_set_status(s_current_sensor_index, "Connect failed");
                 xSemaphoreGive(s_read_complete_sem);
             } else {
                 ESP_LOGI(TAG, "Open success, conn_id: %d", param->open.conn_id);
                 s_conn_id = param->open.conn_id;
                 s_connected = true;
+                sensor_data_set_status(s_current_sensor_index, "Discovering...");
 
                 // Reset handles
                 s_service_start_handle = 0;
@@ -850,6 +853,7 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             }
 
             ESP_LOGI(TAG, "Registered for notify, handle: %d", param->reg_for_notify.handle);
+            sensor_data_set_status(s_current_sensor_index, "Subscribing...");
 
             // Write CCCD to enable notifications (0x0001)
             if (s_cccd_handle != 0) {
@@ -891,6 +895,7 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 ESP_LOGI(TAG, "History mode: signaling setup complete");
                 xSemaphoreGive(s_read_complete_sem);
             } else {
+                sensor_data_set_status(s_current_sensor_index, "Requesting...");
                 ESP_LOGI(TAG, "Sending real-time data request command...");
                 if (s_cmd_char_handle != 0) {
                     esp_err_t ret = esp_ble_gattc_write_char(
@@ -928,6 +933,9 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
 
                     // Parse data
                     parse_inkbird_data(s_recv_data, s_recv_len, s_current_sensor_index);
+
+                    // Clear status - data received
+                    sensor_data_set_status(s_current_sensor_index, NULL);
 
                     // Signal completion
                     xSemaphoreGive(s_read_complete_sem);

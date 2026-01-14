@@ -25,6 +25,11 @@ void ui_co2_display_update(void);
  */
 void ui_co2_display_loading(void);
 
+/**
+ * @brief Update the status text on the loading screen
+ */
+void ui_co2_display_set_status(const char *status);
+
 void ui_co2_display_force_refresh(void);
 
 #ifdef __cplusplus

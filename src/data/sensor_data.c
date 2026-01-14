@@ -153,7 +153,21 @@ void sensor_data_set_name(uint8_t index, const char *name)
     if (index >= SENSOR_COUNT || name == NULL) {
         return;
     }
-    
+
     strncpy(s_sensors[index].name, name, sizeof(s_sensors[index].name) - 1);
     s_sensors[index].name[sizeof(s_sensors[index].name) - 1] = '\0';
+}
+
+void sensor_data_set_status(uint8_t index, const char *status)
+{
+    if (index >= SENSOR_COUNT) {
+        return;
+    }
+
+    if (status == NULL) {
+        s_sensors[index].status_text[0] = '\0';
+    } else {
+        strncpy(s_sensors[index].status_text, status, sizeof(s_sensors[index].status_text) - 1);
+        s_sensors[index].status_text[sizeof(s_sensors[index].status_text) - 1] = '\0';
+    }
 }

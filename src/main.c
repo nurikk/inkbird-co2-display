@@ -57,6 +57,7 @@ static void progress_update_cb(TimerHandle_t timer)
     s_do_refresh = true;
 }
 
+
 static void led_init(void)
 {
     gpio_config_t io_conf = {
@@ -363,6 +364,17 @@ void app_main(void)
         }
     }
 
+    // Initialize UI
+    ESP_LOGI(TAG, "Initializing UI...");
+    ui_co2_display_init();
+
+    // Set initial status for all enabled sensors
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        if (inkbird_ble_is_sensor_enabled(i)) {
+            sensor_data_set_status(i, "Waiting...");
+        }
+    }
+
     // Initialize BLE for Inkbird sensors
     ESP_LOGI(TAG, "Initializing Bluetooth for Inkbird sensors...");
     ret = inkbird_ble_init();
@@ -370,15 +382,6 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE init failed!");
         return;
     }
-
-    // Initialize UI
-    ESP_LOGI(TAG, "Initializing UI...");
-    ui_co2_display_init();
-
-    // Show loading screen immediately
-    ESP_LOGI(TAG, "Showing loading screen...");
-    ui_co2_display_loading();
-    ui_co2_display_force_refresh();
 
     ESP_LOGI(TAG, "Starting display task...");
     xTaskCreate(
@@ -390,6 +393,11 @@ void app_main(void)
         NULL
     );
 
+    // Initial display refresh to show tiles with status
+    vTaskDelay(pdMS_TO_TICKS(100));
+    s_do_refresh = true;
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // ========== PHASE 1: Read current real-time values ==========
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
@@ -397,8 +405,10 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     for (int i = 0; i < SENSOR_COUNT; i++) {
         if (inkbird_ble_is_sensor_enabled(i)) {
+            sensor_data_set_status(i, "Connecting...");
+            s_do_refresh = true;
             read_initial_sensor_value(i);
-            vTaskDelay(pdMS_TO_TICKS(1000));  // Brief delay between sensors
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
@@ -438,7 +448,7 @@ void app_main(void)
     for (int i = 0; i < SENSOR_COUNT; i++) {
         if (inkbird_ble_is_sensor_enabled(i)) {
             download_sensor_history(i);
-            vTaskDelay(pdMS_TO_TICKS(2000));  // Delay between sensors
+            vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
 

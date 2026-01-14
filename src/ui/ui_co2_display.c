@@ -58,6 +58,7 @@ static lv_obj_t *s_chart_labels[SENSOR_COUNT];
 static lv_chart_series_t *s_chart_series[SENSOR_COUNT];
 static int32_t s_chart_data[SENSOR_COUNT][SENSOR_HISTORY_SIZE];
 static bool s_ui_created = false;
+static lv_obj_t *s_loading_status_label = NULL;
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -197,6 +198,8 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
 static void create_ui(void)
 {
+    s_loading_status_label = NULL;
+
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, lv_color_hex(COLOR_BG_DARK), 0);
     lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_NONE, 0);
@@ -292,11 +295,19 @@ void ui_co2_display_loading(void)
     lv_label_set_text(title, "CO2 Display");
     lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
 
-    lv_obj_t *subtitle = lv_label_create(screen);
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
-    lv_label_set_text(subtitle, "Connecting to sensors...");
-    lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 14);
+    s_loading_status_label = lv_label_create(screen);
+    lv_obj_set_style_text_color(s_loading_status_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(s_loading_status_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_loading_status_label, "Initializing...");
+    lv_obj_align(s_loading_status_label, LV_ALIGN_CENTER, 0, 14);
+}
+
+void ui_co2_display_set_status(const char *status)
+{
+    if (s_loading_status_label != NULL) {
+        lv_label_set_text(s_loading_status_label, status);
+        lv_obj_align(s_loading_status_label, LV_ALIGN_CENTER, 0, 14);
+    }
 }
 
 void ui_co2_display_update(void)
@@ -328,6 +339,7 @@ void ui_co2_display_update(void)
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
             lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
+            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_48, 0);
 
             char co2_str[16];
             snprintf(co2_str, sizeof(co2_str), "%u", sensor->current.co2_ppm);
@@ -346,11 +358,21 @@ void ui_co2_display_update(void)
             char hum_str[16];
             snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
             lv_label_set_text(s_hum_labels[i], hum_str);
+        } else if (sensor->status_text[0] != '\0') {
+            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
+            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_14, 0);
+            lv_label_set_text(s_co2_labels[i], sensor->status_text);
+            lv_label_set_text(s_temp_labels[i], "");
+            lv_label_set_text(s_hum_labels[i], "");
         } else {
             lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_48, 0);
             lv_label_set_text(s_co2_labels[i], "---");
             lv_label_set_text(s_temp_labels[i], "--.-C");
             lv_label_set_text(s_hum_labels[i], "--%");
