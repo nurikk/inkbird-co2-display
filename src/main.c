@@ -17,6 +17,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 
 #include "lvgl.h"
 
@@ -26,6 +27,10 @@
 #include "inkbird_ble.h"
 
 static const char *TAG = "main";
+
+#define LED_RED_PIN     GPIO_NUM_4
+#define LED_GREEN_PIN   GPIO_NUM_17
+#define LED_BLUE_PIN    GPIO_NUM_16
 
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
@@ -44,6 +49,45 @@ static volatile bool s_do_refresh = false;
 
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
+
+static void led_init(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << LED_RED_PIN) | (1ULL << LED_GREEN_PIN) | (1ULL << LED_BLUE_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(LED_RED_PIN, 1);
+    gpio_set_level(LED_GREEN_PIN, 1);
+    gpio_set_level(LED_BLUE_PIN, 1);
+}
+
+static void led_set_color(bool red, bool green, bool blue)
+{
+    gpio_set_level(LED_RED_PIN, !red);
+    gpio_set_level(LED_GREEN_PIN, !green);
+    gpio_set_level(LED_BLUE_PIN, !blue);
+}
+
+static void led_update_from_co2(void)
+{
+    sensor_data_t *sensor = sensor_data_get(0);
+    if (!sensor || !sensor->connected || sensor->current.co2_ppm == 0) {
+        return;
+    }
+
+    uint16_t co2 = sensor->current.co2_ppm;
+    if (co2 >= 1400) {
+        led_set_color(true, false, false);
+    } else if (co2 >= 800) {
+        led_set_color(true, true, false);
+    } else {
+        led_set_color(false, true, false);
+    }
+}
 
 /**
  * @brief Download historical data from a sensor
@@ -148,6 +192,7 @@ static void sensor_update_cb(TimerHandle_t timer)
     }
 
     s_do_refresh = true;
+    led_update_from_co2();
     ESP_LOGI(TAG, "Sensor data updated from BLE");
 }
 
@@ -203,6 +248,7 @@ static bool read_initial_sensor_value(int sensor_idx)
                      sensor_idx, reading.co2_ppm,
                      reading.temperature / 10.0f,
                      reading.humidity / 10.0f);
+            led_update_from_co2();
             return true;
         }
 
@@ -258,6 +304,9 @@ void app_main(void)
     ESP_LOGI(TAG, "  ESP32 + TFT + Inkbird BLE");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
+
+    ESP_LOGI(TAG, "Initializing LED...");
+    led_init();
 
     ESP_LOGI(TAG, "Initializing TFT display...");
     esp_err_t ret = epd_init();
