@@ -330,8 +330,16 @@ void ui_co2_display_update(void)
             status = CO2_STATUS_OFFLINE;
         } else {
             inkbird_co2_thresholds_t th = inkbird_ble_get_thresholds(i);
-            if (th.valid) {
-                status = sensor_data_get_co2_status_ex(sensor->current.co2_ppm, th.low_ppm, th.high_ppm);
+            if (th.thresholds_valid) {
+                uint16_t low_ppm, high_ppm;
+                if (th.use_custom) {
+                    low_ppm = th.plant_low_ppm;
+                    high_ppm = th.plant_high_ppm;
+                } else {
+                    low_ppm = th.normal_low_ppm;
+                    high_ppm = th.normal_high_ppm;
+                }
+                status = sensor_data_get_co2_status_ex(sensor->current.co2_ppm, low_ppm, high_ppm);
             } else {
                 status = sensor_data_get_co2_status(sensor->current.co2_ppm);
             }

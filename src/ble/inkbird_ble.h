@@ -91,11 +91,21 @@ typedef struct {
 
 /**
  * @brief CO2 threshold settings synced from sensor
+ *
+ * The sensor supports two threshold modes:
+ * - Normal mode: Fixed default thresholds (420-2000 PPM)
+ * - Plant/Custom mode: User-configurable thresholds
+ *
+ * The 'use_custom' flag indicates which mode the sensor is configured for.
  */
 typedef struct {
-    uint16_t low_ppm;       // Low threshold (below = good air quality)
-    uint16_t high_ppm;      // High threshold (above = poor air quality)
-    bool     valid;         // true if thresholds have been synced from sensor
+    uint16_t normal_low_ppm;   // Normal mode low threshold (default: 420)
+    uint16_t normal_high_ppm;  // Normal mode high threshold (default: 2000)
+    uint16_t plant_low_ppm;    // Plant/custom mode low threshold
+    uint16_t plant_high_ppm;   // Plant/custom mode high threshold
+    bool     use_custom;       // true = use plant/custom thresholds, false = use normal
+    bool     settings_valid;   // true if CO2 settings (0x02) have been synced
+    bool     thresholds_valid; // true if thresholds (0x03) have been synced
 } inkbird_co2_thresholds_t;
 
 /**

@@ -50,6 +50,9 @@ static const char *TAG = "inkbird_ble";
 // Commands (from APK reverse engineering - see INKBIRD_IAM_T1_PROTOCOL.md)
 // Command format: 55 AA [cmd] [len] [data...] [checksum]
 static const uint8_t CMD_REALTIME_DATA[] = {0x55, 0xAA, 0x09, 0x06, 0x01, 0x0F};  // Request real-time data
+static const uint8_t CMD_PAIRING[] = {0x55, 0xAA, 0x08, 0x06, 0x01, 0x0E};         // Pairing request
+static const uint8_t CMD_CO2_SETTINGS[]  = {0x55, 0xAA, 0x02, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C};  // Query CO2 settings
+static const uint8_t CMD_CO2_THRESHOLDS[] = {0x55, 0xAA, 0x03, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10}; // Query thresholds
 static const uint8_t CMD_HISTORY_START[] = {0x55, 0xAA, 0x07, 0x06, 0x00, 0x0C};
 static const uint8_t CMD_HISTORY_STOP[]  = {0x55, 0xAA, 0x07, 0x06, 0x01, 0x0D};
 
@@ -139,7 +142,7 @@ static bool s_history_buffer_wrapped = false; // True if buffer has wrapped arou
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 static void read_task(void *arg);
-static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_idx);
+static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_idx);
 static void parse_history_notification(const uint8_t *data, size_t len);
 static bool is_empty_record(const uint8_t *data);
 static bool parse_history_record(const uint8_t *data);
@@ -171,6 +174,19 @@ esp_err_t inkbird_ble_init(void)
     memset(s_thresholds, 0, sizeof(s_thresholds));
     memset(s_failure_count, 0, sizeof(s_failure_count));
     memset(s_skip_cycles, 0, sizeof(s_skip_cycles));
+
+    // Initialize thresholds with protocol defaults (will be overwritten if sensor responds)
+    // Default to normal mode (420-2000 PPM) - most common configuration
+    for (int i = 0; i < INKBIRD_SENSOR_COUNT; i++) {
+        s_thresholds[i].normal_low_ppm = 420;
+        s_thresholds[i].normal_high_ppm = 2000;
+        s_thresholds[i].plant_low_ppm = 340;
+        s_thresholds[i].plant_high_ppm = 5000;
+        s_thresholds[i].use_custom = false;  // Default to normal mode
+        s_thresholds[i].settings_valid = false;
+        s_thresholds[i].thresholds_valid = true;  // Use protocol defaults
+    }
+    ESP_LOGI(TAG, "Initialized with protocol default thresholds: normal=420-2000, plant=340-5000 ppm");
 
     // Create synchronization primitives
     s_ble_mutex = xSemaphoreCreateMutex();
@@ -914,8 +930,30 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                 xSemaphoreGive(s_read_complete_sem);
             } else {
                 sensor_data_set_status(s_current_sensor_index, "Requesting...");
-                ESP_LOGI(TAG, "Sending real-time data request command...");
                 if (s_cmd_char_handle != 0) {
+                    // Send pairing request (0x08) to initiate communication
+                    ESP_LOGI(TAG, "Sending pairing request...");
+                    esp_ble_gattc_write_char(
+                        gattc_if, s_conn_id, s_cmd_char_handle,
+                        sizeof(CMD_PAIRING), (uint8_t *)CMD_PAIRING,
+                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+                    // Send CO2 settings request (0x02) to get custom mode flag
+                    ESP_LOGI(TAG, "Sending CO2 settings request...");
+                    esp_ble_gattc_write_char(
+                        gattc_if, s_conn_id, s_cmd_char_handle,
+                        sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
+                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+                    // Send CO2 thresholds request (0x03)
+                    ESP_LOGI(TAG, "Sending CO2 thresholds request...");
+                    esp_ble_gattc_write_char(
+                        gattc_if, s_conn_id, s_cmd_char_handle,
+                        sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
+                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+                    // Send real-time data request (0x09) - completion signaled when this response arrives
+                    ESP_LOGI(TAG, "Sending real-time data request...");
                     esp_err_t ret = esp_ble_gattc_write_char(
                         gattc_if, s_conn_id, s_cmd_char_handle,
                         sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
@@ -940,23 +978,23 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                     // Normal mode - log details
                     ESP_LOGI(TAG, "Notification: handle=%d, len=%d", param->notify.handle, param->notify.value_len);
                     ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
-                    // Normal real-time data
                     // Copy data
                     s_recv_len = param->notify.value_len;
                     if (s_recv_len > sizeof(s_recv_data)) {
                         s_recv_len = sizeof(s_recv_data);
                     }
                     memcpy(s_recv_data, param->notify.value, s_recv_len);
-                    s_data_received = true;
 
-                    // Parse data
-                    parse_inkbird_data(s_recv_data, s_recv_len, s_current_sensor_index);
+                    // Parse data - returns true only for real-time data (cmd 0x01)
+                    bool is_realtime = parse_inkbird_data(s_recv_data, s_recv_len, s_current_sensor_index);
 
-                    // Clear status - data received
-                    sensor_data_set_status(s_current_sensor_index, NULL);
-
-                    // Signal completion
-                    xSemaphoreGive(s_read_complete_sem);
+                    // Only signal completion for real-time data
+                    // Settings (0x02) and threshold (0x03) responses are handled but don't complete
+                    if (is_realtime) {
+                        s_data_received = true;
+                        sensor_data_set_status(s_current_sensor_index, NULL);
+                        xSemaphoreGive(s_read_complete_sem);
+                    }
                 }
             }
             break;
@@ -997,10 +1035,10 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
  * - Bytes 9-10: CO2 in ppm (big-endian)
  * - Bytes 11-12: Pressure in hPa (big-endian)
  */
-static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
+static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
 {
     if (sensor_idx >= INKBIRD_SENSOR_COUNT) {
-        return;
+        return false;
     }
 
     ESP_LOGI(TAG, "=== PARSING DATA ===");
@@ -1015,31 +1053,59 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
     if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA) {
         uint8_t cmd_id = data[2];
 
-        // Parse CO2 thresholds (cmd 0x03)
-        // Format: 55 AA 03 0E [norm_high] [norm_low] [plant_high] [plant_low] [reset] [checksum]
+        // Parse pairing response (cmd 0x08)
+        // Response: 55 AA 08 06 XX - where XX: 00=ready, 02=success
+        if (cmd_id == 0x08 && len >= 5) {
+            uint8_t status = data[4];
+            ESP_LOGI(TAG, "Pairing response: %s (0x%02X)",
+                     status == 0x00 ? "ready" : status == 0x02 ? "success" : "unknown",
+                     status);
+            return false;
+        }
+
+        // Parse CO2 settings (cmd 0x02) - contains custom mode flag
+        // Response format: 55 AA 02 0B [mode] [custom] [auto] [manual] [cal_hi] [cal_lo] [checksum]
+        // Byte 4: Display mode (0-4)
+        // Byte 5: Custom mode flag (00=normal/default, 01=plant/custom)
+        if (cmd_id == 0x02 && len >= 6 && s_ble_mutex != NULL) {
+            bool use_custom = (data[5] != 0x00);
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            s_thresholds[sensor_idx].use_custom = use_custom;
+            s_thresholds[sensor_idx].settings_valid = true;
+            xSemaphoreGive(s_ble_mutex);
+            ESP_LOGI(TAG, "Sensor %d CO2 mode: %s", sensor_idx,
+                     use_custom ? "CUSTOM (plant mode)" : "DEFAULT (normal mode)");
+            return false;
+        }
+
+        // Parse CO2 thresholds (cmd 0x03) - contains both normal and plant thresholds
+        // Response format: 55 AA 03 0E [norm_high] [norm_low] [plant_high] [plant_low] [reset] [checksum]
         // Bytes 4-5: Normal mode high threshold
         // Bytes 6-7: Normal mode low threshold
         // Bytes 8-9: Plant mode high threshold
         // Bytes 10-11: Plant mode low threshold
-        // We use plant mode thresholds as they're typically user-configured
         if (cmd_id == 0x03 && len >= 12 && s_ble_mutex != NULL) {
+            uint16_t norm_high = ((uint16_t)data[4] << 8) | data[5];
+            uint16_t norm_low = ((uint16_t)data[6] << 8) | data[7];
             uint16_t plant_high = ((uint16_t)data[8] << 8) | data[9];
             uint16_t plant_low = ((uint16_t)data[10] << 8) | data[11];
             xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
-            s_thresholds[sensor_idx].high_ppm = plant_high;
-            s_thresholds[sensor_idx].low_ppm = plant_low;
-            s_thresholds[sensor_idx].valid = true;
+            s_thresholds[sensor_idx].normal_high_ppm = norm_high;
+            s_thresholds[sensor_idx].normal_low_ppm = norm_low;
+            s_thresholds[sensor_idx].plant_high_ppm = plant_high;
+            s_thresholds[sensor_idx].plant_low_ppm = plant_low;
+            s_thresholds[sensor_idx].thresholds_valid = true;
             xSemaphoreGive(s_ble_mutex);
-            ESP_LOGI(TAG, "Sensor %d thresholds synced: low=%u, high=%u ppm",
-                     sensor_idx, plant_low, plant_high);
-            return;
+            ESP_LOGI(TAG, "Sensor %d thresholds synced: normal=%u-%u, plant=%u-%u ppm",
+                     sensor_idx, norm_low, norm_high, plant_low, plant_high);
+            return false;
         }
 
         if (cmd_id != 0x01 || len < 13) {
             if (cmd_id != 0x01) {
                 ESP_LOGD(TAG, "Ignoring cmd 0x%02X", cmd_id);
             }
-            return;
+            return false;
         }
         ESP_LOGI(TAG, "Parsing real-time data response (cmd=0x01)");
 
@@ -1073,14 +1139,14 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         ESP_LOGI(TAG, "  Temperature: %.1f C", reading->temperature / 10.0f);
         ESP_LOGI(TAG, "  Humidity: %.1f%%", reading->humidity / 10.0f);
         ESP_LOGI(TAG, "  Pressure: %u hPa", reading->pressure);
-        return;
+        return true;
     }
 
     // Other responses (0x02-0x05, etc.) are silently ignored since we returned above
     // If we get here with 55 AA header, it's an unknown command
     if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA) {
         ESP_LOGD(TAG, "Ignoring response with cmd=0x%02X", data[2]);
-        return;
+        return false;
     }
 
     ESP_LOGW(TAG, "Unknown data format: len=%d", len);
@@ -1088,6 +1154,7 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         ESP_LOGW(TAG, "  First 4 bytes: 0x%02X 0x%02X 0x%02X 0x%02X",
                  data[0], data[1], data[2], data[3]);
     }
+    return false;
 }
 
 // ============================================================================
