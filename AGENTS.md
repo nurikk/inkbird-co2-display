@@ -32,7 +32,7 @@ co2_display/
 | `pio run -t upload` | Build and upload to device |
 | `pio run -t clean` | Clean build artifacts |
 | `pio run -t fullclean` | Full clean including dependencies |
-| `pio device monitor` | Open serial monitor (115200 baud). Requires PTY to run |
+| `pio run -t mon` | Open serial monitor (115200 baud) |
 | `pio run -t menuconfig` | Open ESP-IDF configuration menu |
 
 ## Testing Commands
@@ -203,7 +203,7 @@ void app_main(void)
 
 When making code changes to this project:
 
-- **Always upload and monitor automatically**: After making code changes, always run `pio run -t upload && pio device monitor` without asking the user for permission. Do not ask "would you like me to upload?" or "should I flash the device?" — just do it.
+- **Always upload and monitor automatically**: After making code changes, always run `pio run -t upload && pio run -t mon` without asking the user for permission. Do not ask "would you like me to upload?" or "should I flash the device?" — just do it.
 - **Be proactive**: The user expects the agent to complete the full workflow (edit → build → upload → monitor) in one go.
 - **Handle errors autonomously**: If upload fails, check common issues and retry. If build fails, fix the errors and try again.
 
