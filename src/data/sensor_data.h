@@ -56,6 +56,9 @@ typedef struct {
     char name[16];                              // Sensor name (e.g., "Sensor 1")
     sensor_reading_t current;                   // Most recent reading
     int16_t co2_history[SENSOR_HISTORY_SIZE];   // CO2 history ring buffer
+    int16_t temp_history[SENSOR_HISTORY_SIZE];  // Temperature history (0.1°C units)
+    int16_t hum_history[SENSOR_HISTORY_SIZE];   // Humidity history (0.1% units)
+    int16_t pres_history[SENSOR_HISTORY_SIZE];  // Pressure history (hPa)
     uint8_t history_head;                       // Ring buffer head index
     uint8_t history_count;                      // Number of valid history entries
     bool connected;                             // Sensor connection status
@@ -89,7 +92,7 @@ sensor_data_t *sensor_data_get(uint8_t index);
 void sensor_data_update(uint8_t index, const sensor_reading_t *reading);
 
 /**
- * @brief Add CO2 value to history only
+ * @brief Add CO2 value to history only (legacy)
  *
  * Adds a CO2 reading to the history buffer without updating the current reading.
  * Use this for loading historical data from sensor memory.
@@ -98,6 +101,21 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading);
  * @param co2_ppm CO2 value in ppm
  */
 void sensor_data_add_history(uint8_t index, uint16_t co2_ppm);
+
+/**
+ * @brief Add full reading to history
+ *
+ * Adds all metrics to the history buffers without updating the current reading.
+ * Use this for loading historical data from sensor memory.
+ *
+ * @param index Sensor index (0-3)
+ * @param co2_ppm CO2 value in ppm
+ * @param temperature Temperature in 0.1°C units
+ * @param humidity Humidity in 0.1% units
+ * @param pressure Pressure in hPa
+ */
+void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
+                                   int16_t temperature, uint16_t humidity, uint16_t pressure);
 
 /**
  * @brief Get CO2 status level using default thresholds
@@ -136,6 +154,21 @@ const char *sensor_data_get_status_text(co2_status_t status);
  * @return Pointer to history array (internal buffer, do not free)
  */
 const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count);
+
+/**
+ * @brief Get temperature history as array for charting
+ */
+const int16_t *sensor_data_get_temp_history(uint8_t index, uint8_t *out_count);
+
+/**
+ * @brief Get humidity history as array for charting
+ */
+const int16_t *sensor_data_get_hum_history(uint8_t index, uint8_t *out_count);
+
+/**
+ * @brief Get pressure history as array for charting
+ */
+const int16_t *sensor_data_get_pres_history(uint8_t index, uint8_t *out_count);
 
 /**
  * @brief Set sensor name

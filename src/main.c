@@ -159,13 +159,11 @@ static void download_sensor_history(uint8_t sensor_idx)
                      s_history_records[count - 1].temperature / 10.0f);
         }
 
-        // Feed all records to chart history only (don't update current reading)
-        // Records are already in chronological order (oldest first)
         for (int i = 0; i < count; i++) {
             inkbird_history_record_t *hist = &s_history_records[i];
-            // Only add valid CO2 readings to history
             if (hist->co2_ppm > 0 && hist->co2_ppm < 10000) {
-                sensor_data_add_history(sensor_idx, hist->co2_ppm);
+                sensor_data_add_history_full(sensor_idx, hist->co2_ppm,
+                                              hist->temperature, hist->humidity, hist->pressure);
             }
         }
 
@@ -312,8 +310,15 @@ static void display_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     int64_t last_update_us = 0;
+    int64_t last_touch_status_us = 0;
 
     while (1) {
+        int64_t now_check = esp_timer_get_time();
+        if (now_check - last_touch_status_us >= 60000000) {
+            ESP_LOGI(TAG, "Touch type: %d (0=none, 1=gt911, 2=xpt2046)",
+                     ui_co2_display_get_touch_type());
+            last_touch_status_us = now_check;
+        }
         lv_timer_handler();
 
         int64_t now_us = esp_timer_get_time();
@@ -367,6 +372,7 @@ void app_main(void)
     // Initialize UI
     ESP_LOGI(TAG, "Initializing UI...");
     ui_co2_display_init();
+    ESP_LOGI(TAG, "UI initialized - check serial for touch status");
 
     // Set initial status for all enabled sensors
     for (int i = 0; i < SENSOR_COUNT; i++) {

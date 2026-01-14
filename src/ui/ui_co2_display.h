@@ -32,6 +32,12 @@ void ui_co2_display_set_status(const char *status);
 
 void ui_co2_display_force_refresh(void);
 
+/**
+ * @brief Get the touch controller type
+ * @return 0=none, 1=gt911, 2=xpt2046
+ */
+int ui_co2_display_get_touch_type(void);
+
 #ifdef __cplusplus
 }
 #endif

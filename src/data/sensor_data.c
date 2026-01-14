@@ -10,8 +10,11 @@
 // Static sensor data storage
 static sensor_data_t s_sensors[SENSOR_COUNT];
 
-// Temporary buffer for returning history in order
-static int16_t s_history_buffer[SENSOR_HISTORY_SIZE];
+// Temporary buffers for returning history in order
+static int16_t s_co2_history_buffer[SENSOR_HISTORY_SIZE];
+static int16_t s_temp_history_buffer[SENSOR_HISTORY_SIZE];
+static int16_t s_hum_history_buffer[SENSOR_HISTORY_SIZE];
+static int16_t s_pres_history_buffer[SENSOR_HISTORY_SIZE];
 
 void sensor_data_init(void)
 {
@@ -22,10 +25,12 @@ void sensor_data_init(void)
         s_sensors[i].connected = false;
         s_sensors[i].history_head = 0;
         s_sensors[i].history_count = 0;
-        
-        // Initialize history with invalid marker
+
         for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
-            s_sensors[i].co2_history[j] = -1;  // -1 = no data
+            s_sensors[i].co2_history[j] = -1;
+            s_sensors[i].temp_history[j] = -1;
+            s_sensors[i].hum_history[j] = -1;
+            s_sensors[i].pres_history[j] = -1;
         }
     }
 }
@@ -43,17 +48,18 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
     if (index >= SENSOR_COUNT || reading == NULL) {
         return;
     }
-    
+
     sensor_data_t *sensor = &s_sensors[index];
-    
-    // Update current reading
+
     sensor->current = *reading;
     sensor->connected = true;
-    
-    // Add to history ring buffer
+
     sensor->co2_history[sensor->history_head] = (int16_t)reading->co2_ppm;
+    sensor->temp_history[sensor->history_head] = reading->temperature;
+    sensor->hum_history[sensor->history_head] = (int16_t)reading->humidity;
+    sensor->pres_history[sensor->history_head] = (int16_t)reading->pressure;
     sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
-    
+
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         sensor->history_count++;
     }
@@ -61,16 +67,24 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
 
 void sensor_data_add_history(uint8_t index, uint16_t co2_ppm)
 {
+    sensor_data_add_history_full(index, co2_ppm, -1, 0, 0);
+}
+
+void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
+                                   int16_t temperature, uint16_t humidity, uint16_t pressure)
+{
     if (index >= SENSOR_COUNT) {
         return;
     }
-    
+
     sensor_data_t *sensor = &s_sensors[index];
-    
-    // Add to history ring buffer only (don't update current reading)
+
     sensor->co2_history[sensor->history_head] = (int16_t)co2_ppm;
+    sensor->temp_history[sensor->history_head] = temperature;
+    sensor->hum_history[sensor->history_head] = (int16_t)humidity;
+    sensor->pres_history[sensor->history_head] = (int16_t)pressure;
     sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
-    
+
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         sensor->history_count++;
     }
@@ -129,7 +143,7 @@ const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count)
     // Reorder ring buffer into chronological order
     // Oldest data first, newest last
     if (sensor->history_count == 0) {
-        return s_history_buffer;
+        return s_co2_history_buffer;
     }
     
     uint8_t start;
@@ -143,17 +157,86 @@ const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count)
     
     for (uint8_t i = 0; i < sensor->history_count; i++) {
         uint8_t src_idx = (start + i) % SENSOR_HISTORY_SIZE;
-        s_history_buffer[i] = sensor->co2_history[src_idx];
+        s_co2_history_buffer[i] = sensor->co2_history[src_idx];
     }
     
     // Fill remaining with last value (for charts)
     int16_t last_val = sensor->history_count > 0 ? 
-                       s_history_buffer[sensor->history_count - 1] : 0;
+                       s_co2_history_buffer[sensor->history_count - 1] : 0;
     for (uint8_t i = sensor->history_count; i < SENSOR_HISTORY_SIZE; i++) {
-        s_history_buffer[i] = last_val;
+        s_co2_history_buffer[i] = last_val;
     }
     
-    return s_history_buffer;
+    return s_co2_history_buffer;
+}
+
+static const int16_t *get_history_generic(uint8_t index, uint8_t *out_count,
+                                           int16_t *src_history, int16_t *dst_buffer)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    sensor_data_t *sensor = &s_sensors[index];
+
+    if (out_count) {
+        *out_count = sensor->history_count;
+    }
+
+    if (sensor->history_count == 0) {
+        return dst_buffer;
+    }
+
+    uint8_t start;
+    if (sensor->history_count < SENSOR_HISTORY_SIZE) {
+        start = 0;
+    } else {
+        start = sensor->history_head;
+    }
+
+    for (uint8_t i = 0; i < sensor->history_count; i++) {
+        uint8_t src_idx = (start + i) % SENSOR_HISTORY_SIZE;
+        dst_buffer[i] = src_history[src_idx];
+    }
+
+    int16_t last_val = sensor->history_count > 0 ?
+                       dst_buffer[sensor->history_count - 1] : 0;
+    for (uint8_t i = sensor->history_count; i < SENSOR_HISTORY_SIZE; i++) {
+        dst_buffer[i] = last_val;
+    }
+
+    return dst_buffer;
+}
+
+const int16_t *sensor_data_get_temp_history(uint8_t index, uint8_t *out_count)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    return get_history_generic(index, out_count,
+                               s_sensors[index].temp_history, s_temp_history_buffer);
+}
+
+const int16_t *sensor_data_get_hum_history(uint8_t index, uint8_t *out_count)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    return get_history_generic(index, out_count,
+                               s_sensors[index].hum_history, s_hum_history_buffer);
+}
+
+const int16_t *sensor_data_get_pres_history(uint8_t index, uint8_t *out_count)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    return get_history_generic(index, out_count,
+                               s_sensors[index].pres_history, s_pres_history_buffer);
 }
 
 void sensor_data_set_name(uint8_t index, const char *name)
