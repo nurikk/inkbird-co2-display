@@ -46,8 +46,9 @@ static const char *TAG = "inkbird_ble";
 // CCCD UUID for enabling notifications
 #define ESP_GATT_UUID_CHAR_CLIENT_CONFIG 0x2902
 
-// History download commands (from APK reverse engineering)
-// Command format: 55 AA [cmd] [subcmd] [len] [data...] [checksum]
+// Commands (from APK reverse engineering - see INKBIRD_IAM_T1_PROTOCOL.md)
+// Command format: 55 AA [cmd] [len] [data...] [checksum]
+static const uint8_t CMD_REALTIME_DATA[] = {0x55, 0xAA, 0x09, 0x06, 0x01, 0x0F};  // Request real-time data
 static const uint8_t CMD_HISTORY_START[] = {0x55, 0xAA, 0x07, 0x06, 0x00, 0x0C};
 static const uint8_t CMD_HISTORY_STOP[]  = {0x55, 0xAA, 0x07, 0x06, 0x01, 0x0D};
 
@@ -885,12 +886,23 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
 
             // For history download mode, signal that setup is complete so we can
             // proceed to send the history command.
-            // For normal mode, we wait for the first notification to arrive.
+            // For normal mode, send real-time data request command to get immediate reading.
             if (s_history_state != INKBIRD_HISTORY_IDLE) {
                 ESP_LOGI(TAG, "History mode: signaling setup complete");
                 xSemaphoreGive(s_read_complete_sem);
             } else {
-                ESP_LOGI(TAG, "Waiting for sensor data (may take a few seconds)...");
+                ESP_LOGI(TAG, "Sending real-time data request command...");
+                if (s_cmd_char_handle != 0) {
+                    esp_err_t ret = esp_ble_gattc_write_char(
+                        gattc_if, s_conn_id, s_cmd_char_handle,
+                        sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
+                        ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                    if (ret != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to send data request: %s", esp_err_to_name(ret));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No command handle, waiting for passive notification...");
+                }
             }
             break;
 
@@ -920,6 +932,14 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
                     // Signal completion
                     xSemaphoreGive(s_read_complete_sem);
                 }
+            }
+            break;
+
+        case ESP_GATTC_WRITE_CHAR_EVT:
+            if (param->write.status != ESP_GATT_OK) {
+                ESP_LOGW(TAG, "Write char failed: %d", param->write.status);
+            } else {
+                ESP_LOGI(TAG, "Command written successfully to handle %d", param->write.handle);
             }
             break;
 
@@ -963,10 +983,16 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         ESP_LOG_BUFFER_HEX(TAG, data, len > 20 ? 20 : len);
     }
 
-    // ESPHome format: starts with 0x55
-    // Check: x[0] != 0x55 && (x[4] & 0xf0) != 0 => return NAN
-    if (len >= 13 && data[0] == 0x55 && (data[4] & 0xF0) == 0) {
-        ESP_LOGI(TAG, "Parsing ESPHome format (0x55 header)");
+    // Response format: 55 AA [cmd] [len] [data...]
+    // Command 0x01 = Real-time data response (the one we want)
+    // Commands 0x02-0x05 = Settings/thresholds (ignore these)
+    if (len >= 13 && data[0] == 0x55 && data[1] == 0xAA) {
+        uint8_t cmd_id = data[2];
+        if (cmd_id != 0x01) {
+            ESP_LOGD(TAG, "Ignoring non-data response (cmd=0x%02X)", cmd_id);
+            return;
+        }
+        ESP_LOGI(TAG, "Parsing real-time data response (cmd=0x01)");
 
         xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
         inkbird_reading_t *reading = &s_readings[sensor_idx];
@@ -1001,40 +1027,10 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         return;
     }
 
-    // Also try AA 01 format (from Python library)
-    if (len >= 16 && data[0] == 0xAA && data[1] == 0x01) {
-        ESP_LOGI(TAG, "Parsing Python library format (0xAA 0x01 header)");
-
-        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
-        inkbird_reading_t *reading = &s_readings[sensor_idx];
-
-        // Temperature (bytes 4-6)
-        bool is_negative = (data[4] & 0x0F) != 0;
-        uint16_t temp_raw = ((uint16_t)data[5] << 8) | data[6];
-        reading->temperature = is_negative ? -(int16_t)temp_raw : (int16_t)temp_raw;
-
-        // Humidity (bytes 7-8)
-        reading->humidity = ((uint16_t)data[7] << 8) | data[8];
-
-        // CO2 (bytes 9-10)
-        reading->co2_ppm = ((uint16_t)data[9] << 8) | data[10];
-
-        // Pressure (bytes 11-12)
-        reading->pressure = ((uint16_t)data[11] << 8) | data[12];
-
-        // Update metadata
-        reading->timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        reading->valid = true;
-        reading->stale = false;
-
-        xSemaphoreGive(s_ble_mutex);
-
-        ESP_LOGI(TAG, "=== SENSOR DATA ===");
-        ESP_LOGI(TAG, "  Sensor %d [%s]:", sensor_idx, INKBIRD_SENSORS[sensor_idx].name);
-        ESP_LOGI(TAG, "  CO2: %u ppm", reading->co2_ppm);
-        ESP_LOGI(TAG, "  Temperature: %.1f C", reading->temperature / 10.0f);
-        ESP_LOGI(TAG, "  Humidity: %.1f%%", reading->humidity / 10.0f);
-        ESP_LOGI(TAG, "  Pressure: %u hPa", reading->pressure);
+    // Other responses (0x02-0x05, etc.) are silently ignored since we returned above
+    // If we get here with 55 AA header, it's an unknown command
+    if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA) {
+        ESP_LOGD(TAG, "Ignoring response with cmd=0x%02X", data[2]);
         return;
     }
 
