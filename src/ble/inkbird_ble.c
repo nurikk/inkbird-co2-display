@@ -1586,3 +1586,13 @@ inkbird_history_state_t inkbird_ble_get_history_state(void)
 {
     return s_history_state;
 }
+
+void inkbird_ble_get_history_progress(uint16_t *out_expected, uint16_t *out_received)
+{
+    if (out_expected != NULL) {
+        *out_expected = s_history_expected_count;
+    }
+    if (out_received != NULL) {
+        *out_received = s_history_received_count;
+    }
+}

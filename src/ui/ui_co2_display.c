@@ -13,6 +13,7 @@
 #include "epd_driver.h"
 #include "sensor_data.h"
 #include "ui_co2_display.h"
+#include "inkbird_ble.h"
 
 #define GRID_COLS 2
 #define GRID_ROWS 2
@@ -186,11 +187,11 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
     s_chart_series[index] = lv_chart_add_series(chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
 
-    lv_obj_t *chart_label = lv_label_create(chart);
+    lv_obj_t *chart_label = lv_label_create(tile);
     lv_obj_set_style_text_color(chart_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_12, 0);
     lv_label_set_text(chart_label, "No history");
-    lv_obj_center(chart_label);
+    lv_obj_align(chart_label, LV_ALIGN_BOTTOM_MID, 0, -5);
     s_chart_labels[index] = chart_label;
 }
 
@@ -356,7 +357,19 @@ void ui_co2_display_update(void)
         }
 
         if (sensor->downloading) {
-            lv_label_set_text(s_chart_labels[i], "Syncing...");
+            char sync_str[24];
+            uint16_t expected = 0, received = 0;
+            inkbird_ble_get_history_progress(&expected, &received);
+            if (expected > 0) {
+                int percent = (received * 100) / expected;
+                if (percent > 100) {
+                    percent = 100;
+                }
+                snprintf(sync_str, sizeof(sync_str), "Syncing %d%%", percent);
+            } else {
+                snprintf(sync_str, sizeof(sync_str), "Syncing...");
+            }
+            lv_label_set_text(s_chart_labels[i], sync_str);
             lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
             continue;

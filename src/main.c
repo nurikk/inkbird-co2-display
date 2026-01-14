@@ -43,12 +43,19 @@ static const char *TAG = "main";
 // FreeRTOS timer handles
 static TimerHandle_t s_sensor_timer = NULL;
 static TimerHandle_t s_refresh_timer = NULL;
+static TimerHandle_t s_progress_timer = NULL;
 
 // Flag to trigger display refresh
 static volatile bool s_do_refresh = false;
 
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
+
+static void progress_update_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    s_do_refresh = true;
+}
 
 static void led_init(void)
 {
@@ -106,6 +113,17 @@ static void download_sensor_history(uint8_t sensor_idx)
     ESP_LOGI(TAG, "  Name: %s", inkbird_ble_get_sensor_name(sensor_idx));
     ESP_LOGI(TAG, "========================================");
 
+    if (s_progress_timer == NULL) {
+        s_progress_timer = xTimerCreate(
+            "progress",
+            pdMS_TO_TICKS(200),
+            pdTRUE,
+            NULL,
+            progress_update_cb
+        );
+    }
+    xTimerStart(s_progress_timer, 0);
+
     uint16_t count = 0;
     esp_err_t ret = inkbird_ble_download_history(
         sensor_idx,
@@ -113,6 +131,8 @@ static void download_sensor_history(uint8_t sensor_idx)
         SENSOR_HISTORY_SIZE,
         &count
     );
+
+    xTimerStop(s_progress_timer, 0);
 
     // Clear downloading flag
     if (sensor) {
@@ -266,6 +286,20 @@ static bool read_initial_sensor_value(int sensor_idx)
 }
 
 /**
+ * @brief Check if any sensor is currently downloading
+ */
+static bool any_sensor_downloading(void)
+{
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        sensor_data_t *sensor = sensor_data_get(i);
+        if (sensor && sensor->downloading) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @brief Display task - handles rendering and display updates
  */
 static void display_task(void *arg)
@@ -282,7 +316,10 @@ static void display_task(void *arg)
         lv_timer_handler();
 
         int64_t now_us = esp_timer_get_time();
-        if (s_do_refresh || (now_us - last_update_us) >= 500000) {
+        bool downloading = any_sensor_downloading();
+        int64_t update_interval = downloading ? 100000 : 500000;
+
+        if (s_do_refresh || (now_us - last_update_us) >= update_interval) {
             s_do_refresh = false;
             last_update_us = now_us;
             ui_co2_display_update();
@@ -393,7 +430,9 @@ void app_main(void)
         }
     }
 
+    // Force display update to show "Syncing..." before starting download
     s_do_refresh = true;
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // Download history from each sensor
     for (int i = 0; i < SENSOR_COUNT; i++) {

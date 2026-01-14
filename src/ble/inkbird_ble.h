@@ -190,6 +190,14 @@ esp_err_t inkbird_ble_cancel_history(void);
 inkbird_history_state_t inkbird_ble_get_history_state(void);
 
 /**
+ * @brief Get current history download progress
+ *
+ * @param out_expected Pointer to store expected record count
+ * @param out_received Pointer to store received record count
+ */
+void inkbird_ble_get_history_progress(uint16_t *out_expected, uint16_t *out_received);
+
+/**
  * @brief Start discovery scan for Inkbird sensors
  *
  * Scans for BLE devices advertising the Inkbird service UUID.

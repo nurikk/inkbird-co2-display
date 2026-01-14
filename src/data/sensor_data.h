@@ -60,6 +60,8 @@ typedef struct {
     uint8_t history_count;                      // Number of valid history entries
     bool connected;                             // Sensor connection status
     bool downloading;                           // True while downloading history
+    uint16_t download_expected;                 // Expected record count for download
+    uint16_t download_received;                 // Received record count for download
 } sensor_data_t;
 
 /**
