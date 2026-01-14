@@ -16,16 +16,25 @@
 
 #define GRID_COLS 2
 #define GRID_ROWS 2
-#define GRID_GAP 4
-#define TILE_PAD 8
-#define CHART_HEIGHT 64
-#define HEADER_HEIGHT 24
-#define STATUS_PAD_X 6
-#define STATUS_PAD_Y 2
+#define GRID_GAP 6
+#define TILE_PAD 12
+#define CHART_HEIGHT 42
+#define HEADER_HEIGHT 20
 #define CHART_MIN_PPM 400
 #define CHART_MAX_PPM 2000
 #define LVGL_TICK_PERIOD_MS 5
 #define LVGL_BUFFER_LINES 20
+
+#define COLOR_BG_DARK       0x1A1A2E
+#define COLOR_TILE_BG       0x16213E
+#define COLOR_TILE_BORDER   0x0F3460
+#define COLOR_TEXT_PRIMARY  0xFFFFFF
+#define COLOR_TEXT_MUTED    0x8892A0
+#define COLOR_GOOD          0x00D26A
+#define COLOR_MODERATE      0xFFD93D
+#define COLOR_WARNING       0xFF8C32
+#define COLOR_ALERT         0xFF4757
+#define COLOR_OFFLINE       0x4A5568
 
 
 static const char *TAG = "ui";
@@ -79,15 +88,15 @@ static lv_color_t status_color(co2_status_t status)
 {
     switch (status) {
     case CO2_STATUS_GOOD:
-        return lv_color_hex(0x3BAA6B);
+        return lv_color_hex(COLOR_GOOD);
     case CO2_STATUS_MODERATE:
-        return lv_color_hex(0xE0B23F);
+        return lv_color_hex(COLOR_MODERATE);
     case CO2_STATUS_WARNING:
-        return lv_color_hex(0xE08A3A);
+        return lv_color_hex(COLOR_WARNING);
     case CO2_STATUS_ALERT:
-        return lv_color_hex(0xE04B4B);
+        return lv_color_hex(COLOR_ALERT);
     default:
-        return lv_color_hex(0x7F8C8D);
+        return lv_color_hex(COLOR_OFFLINE);
     }
 }
 
@@ -96,98 +105,90 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
     lv_obj_t *tile = lv_obj_create(lv_screen_active());
     lv_obj_set_pos(tile, tile_x, tile_y);
     lv_obj_set_size(tile, tile_w, tile_h);
-    lv_obj_set_style_radius(tile, 10, 0);
-    lv_obj_set_style_bg_color(tile, lv_color_hex(0xF0F0F0), 0);
+    lv_obj_set_style_radius(tile, 12, 0);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(COLOR_TILE_BG), 0);
     lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(tile, 1, 0);
-    lv_obj_set_style_border_color(tile, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_border_width(tile, 2, 0);
+    lv_obj_set_style_border_color(tile, lv_color_hex(COLOR_TILE_BORDER), 0);
     lv_obj_set_style_pad_all(tile, TILE_PAD, 0);
     lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-
     s_tiles[index] = tile;
 
-    lv_obj_t *header = lv_obj_create(tile);
-    lv_obj_set_size(header, tile_w - (TILE_PAD * 2), HEADER_HEIGHT);
-    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *name = lv_label_create(header);
-    lv_obj_set_style_text_color(name, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_16, 0);
+    lv_obj_t *name = lv_label_create(tile);
+    lv_obj_set_style_text_color(name, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(name, tile_w - (TILE_PAD * 2) - 70);
+    lv_obj_set_width(name, tile_w - (TILE_PAD * 2) - 50);
     lv_label_set_text(name, "Sensor");
+    lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 0);
     s_name_labels[index] = name;
 
-    lv_obj_t *status = lv_label_create(header);
-    lv_label_set_text(status, "----");
-    lv_obj_set_style_text_color(status, lv_color_hex(0x0B0B0B), 0);
-    lv_obj_set_style_text_font(status, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(status, lv_color_hex(0x6F7C86), 0);
+    lv_obj_t *status = lv_label_create(tile);
+    lv_label_set_text(status, "---");
+    lv_obj_set_style_text_color(status, lv_color_hex(COLOR_TILE_BG), 0);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_bg_color(status, lv_color_hex(COLOR_OFFLINE), 0);
     lv_obj_set_style_bg_opa(status, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(status, 8, 0);
-    lv_obj_set_style_pad_left(status, STATUS_PAD_X, 0);
-    lv_obj_set_style_pad_right(status, STATUS_PAD_X, 0);
-    lv_obj_set_style_pad_top(status, STATUS_PAD_Y, 0);
-    lv_obj_set_style_pad_bottom(status, STATUS_PAD_Y, 0);
+    lv_obj_set_style_radius(status, 4, 0);
+    lv_obj_set_style_pad_left(status, 6, 0);
+    lv_obj_set_style_pad_right(status, 6, 0);
+    lv_obj_set_style_pad_top(status, 2, 0);
+    lv_obj_set_style_pad_bottom(status, 2, 0);
+    lv_obj_align(status, LV_ALIGN_TOP_RIGHT, 0, -2);
     s_status_labels[index] = status;
 
     lv_obj_t *co2 = lv_label_create(tile);
-    lv_obj_set_style_text_color(co2, lv_color_hex(0x222222), 0);
-    lv_obj_set_style_text_font(co2, &lv_font_montserrat_28, 0);
-    lv_label_set_text(co2, "----");
-    lv_obj_align(co2, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_set_style_text_color(co2, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(co2, &lv_font_montserrat_48, 0);
+    lv_label_set_text(co2, "---");
+    lv_obj_align(co2, LV_ALIGN_CENTER, 0, -8);
     s_co2_labels[index] = co2;
 
     lv_obj_t *unit = lv_label_create(tile);
-    lv_obj_set_style_text_color(unit, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(unit, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(unit, &lv_font_montserrat_14, 0);
     lv_label_set_text(unit, "ppm");
-    lv_obj_align(unit, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_align_to(unit, co2, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
     s_unit_labels[index] = unit;
 
     lv_obj_t *temp = lv_label_create(tile);
-    lv_obj_set_style_text_color(temp, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(temp, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(temp, &lv_font_montserrat_14, 0);
     lv_label_set_text(temp, "--.-C");
-    lv_obj_align(temp, LV_ALIGN_BOTTOM_LEFT, 0, -(CHART_HEIGHT + 4));
+    lv_obj_align(temp, LV_ALIGN_BOTTOM_LEFT, 0, -(CHART_HEIGHT + 6));
     s_temp_labels[index] = temp;
 
     lv_obj_t *hum = lv_label_create(tile);
-    lv_obj_set_style_text_color(hum, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(hum, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(hum, &lv_font_montserrat_14, 0);
-    lv_label_set_text(hum, "--%" );
-    lv_obj_align(hum, LV_ALIGN_BOTTOM_RIGHT, 0, -(CHART_HEIGHT + 4));
+    lv_label_set_text(hum, "--%");
+    lv_obj_align(hum, LV_ALIGN_BOTTOM_RIGHT, 0, -(CHART_HEIGHT + 6));
     s_hum_labels[index] = hum;
 
     lv_obj_t *chart = lv_chart_create(tile);
     lv_obj_set_size(chart, tile_w - (TILE_PAD * 2), CHART_HEIGHT);
     lv_obj_align(chart, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(chart, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_set_style_bg_color(chart, lv_color_hex(0x0D1B2A), 0);
     lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(chart, 6, 0);
     lv_obj_set_style_border_width(chart, 0, 0);
-    lv_obj_set_style_pad_all(chart, 2, 0);
+    lv_obj_set_style_pad_all(chart, 4, 0);
     lv_obj_set_style_line_width(chart, 2, LV_PART_ITEMS);
-    lv_obj_set_style_line_color(chart, lv_color_hex(0xCCCCCC), LV_PART_MAIN);
-    lv_obj_set_style_line_opa(chart, LV_OPA_40, LV_PART_MAIN);
+    lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_line_color(chart, lv_color_hex(0x2A3F5F), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(chart, LV_OPA_30, LV_PART_MAIN);
     lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(chart, SENSOR_HISTORY_SIZE);
-    lv_chart_set_div_line_count(chart, 2, 0);
+    lv_chart_set_div_line_count(chart, 0, 0);
     lv_chart_set_axis_range(chart, LV_CHART_AXIS_PRIMARY_Y, CHART_MIN_PPM, CHART_MAX_PPM);
     lv_obj_clear_flag(chart, LV_OBJ_FLAG_SCROLLABLE);
     s_chart[index] = chart;
 
-    s_chart_series[index] = lv_chart_add_series(chart, lv_color_hex(0x2ECC71), LV_CHART_AXIS_PRIMARY_Y);
+    s_chart_series[index] = lv_chart_add_series(chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
 
     lv_obj_t *chart_label = lv_label_create(chart);
-    lv_obj_set_style_text_color(chart_label, lv_color_hex(0x9A9A9A), 0);
-    lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(chart_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_12, 0);
     lv_label_set_text(chart_label, "No history");
     lv_obj_center(chart_label);
     s_chart_labels[index] = chart_label;
@@ -196,18 +197,18 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 static void create_ui(void)
 {
     lv_obj_t *screen = lv_screen_active();
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(COLOR_BG_DARK), 0);
     lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    int tile_w = (480 - GRID_GAP) / GRID_COLS;
-    int tile_h = (320 - GRID_GAP) / GRID_ROWS;
+    int tile_w = (480 - GRID_GAP * 3) / GRID_COLS;
+    int tile_h = (320 - GRID_GAP * 3) / GRID_ROWS;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
         int col = i % GRID_COLS;
         int row = i / GRID_COLS;
-        int tile_x = col * (tile_w + GRID_GAP);
-        int tile_y = row * (tile_h + GRID_GAP);
+        int tile_x = GRID_GAP + col * (tile_w + GRID_GAP);
+        int tile_y = GRID_GAP + row * (tile_h + GRID_GAP);
         create_tile(i, tile_x, tile_y, tile_w, tile_h);
     }
 
@@ -280,21 +281,21 @@ void ui_co2_display_loading(void)
 {
     lv_obj_t *screen = lv_screen_active();
     lv_obj_clean(screen);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(COLOR_BG_DARK), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     s_ui_created = false;
 
     lv_obj_t *title = lv_label_create(screen);
-    lv_obj_set_style_text_color(title, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_label_set_text(title, "CO2 Display");
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_t *subtitle = lv_label_create(screen);
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
     lv_label_set_text(subtitle, "Connecting to sensors...");
-    lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 12);
+    lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 14);
 }
 
 void ui_co2_display_update(void)
@@ -316,16 +317,16 @@ void ui_co2_display_update(void)
         lv_color_t status_col = status_color(status);
 
         lv_label_set_text(s_status_labels[i], status_text);
-        lv_obj_set_style_text_color(s_status_labels[i], lv_color_hex(0x0B0B0B), 0);
+        lv_obj_set_style_text_color(s_status_labels[i], lv_color_hex(COLOR_TEXT_PRIMARY), 0);
         lv_obj_set_style_bg_color(s_status_labels[i], status_col, 0);
         lv_obj_set_style_border_color(s_tiles[i], status_col, 0);
         lv_chart_set_series_color(s_chart[i], s_chart_series[i], status_col);
 
         if (sensor->connected) {
-            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(0xFFFFFF), 0);
-            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(0xCFCFCF), 0);
-            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(0xCFCFCF), 0);
-            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(0xCFCFCF), 0);
+            lv_obj_set_style_text_color(s_co2_labels[i], status_col, 0);
+            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
+            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
+            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
 
             char co2_str[16];
             snprintf(co2_str, sizeof(co2_str), "%u", sensor->current.co2_ppm);
@@ -345,17 +346,17 @@ void ui_co2_display_update(void)
             snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
             lv_label_set_text(s_hum_labels[i], hum_str);
         } else {
-            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(0x7A7A7A), 0);
-            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(0x7A7A7A), 0);
-            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(0x7A7A7A), 0);
-            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(0x7A7A7A), 0);
-            lv_label_set_text(s_co2_labels[i], "----");
+            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
+            lv_label_set_text(s_co2_labels[i], "---");
             lv_label_set_text(s_temp_labels[i], "--.-C");
             lv_label_set_text(s_hum_labels[i], "--%");
         }
 
         if (sensor->downloading) {
-            lv_label_set_text(s_chart_labels[i], "Downloading...");
+            lv_label_set_text(s_chart_labels[i], "Syncing...");
             lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
             continue;
@@ -371,7 +372,7 @@ void ui_co2_display_update(void)
             lv_obj_add_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_label_set_text(s_chart_labels[i], "No history");
+            lv_label_set_text(s_chart_labels[i], "No data");
             lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
         }
