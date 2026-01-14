@@ -22,10 +22,9 @@ extern "C" {
 // History buffer size (60 samples = ~1 hour at 1 sample/min)
 #define SENSOR_HISTORY_SIZE 60
 
-// CO2 level thresholds (in ppm)
-#define CO2_LEVEL_GOOD      800
-#define CO2_LEVEL_MODERATE  1000
-#define CO2_LEVEL_WARNING   1400
+// CO2 level thresholds - default fallback values (in ppm)
+#define CO2_LEVEL_GOOD_DEFAULT      800
+#define CO2_LEVEL_WARNING_DEFAULT   1400
 
 /**
  * @brief CO2 air quality level
@@ -101,12 +100,22 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading);
 void sensor_data_add_history(uint8_t index, uint16_t co2_ppm);
 
 /**
- * @brief Get CO2 status level
+ * @brief Get CO2 status level using default thresholds
  *
  * @param co2_ppm CO2 concentration in ppm
  * @return CO2 status level
  */
 co2_status_t sensor_data_get_co2_status(uint16_t co2_ppm);
+
+/**
+ * @brief Get CO2 status level using custom thresholds
+ *
+ * @param co2_ppm CO2 concentration in ppm
+ * @param low_ppm Low threshold (below = good)
+ * @param high_ppm High threshold (above = alert)
+ * @return CO2 status level
+ */
+co2_status_t sensor_data_get_co2_status_ex(uint16_t co2_ppm, uint16_t low_ppm, uint16_t high_ppm);
 
 /**
  * @brief Get status text for CO2 level

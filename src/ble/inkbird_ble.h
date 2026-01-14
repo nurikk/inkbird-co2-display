@@ -90,6 +90,15 @@ typedef struct {
 } inkbird_discovered_t;
 
 /**
+ * @brief CO2 threshold settings synced from sensor
+ */
+typedef struct {
+    uint16_t low_ppm;       // Low threshold (below = good air quality)
+    uint16_t high_ppm;      // High threshold (above = poor air quality)
+    bool     valid;         // true if thresholds have been synced from sensor
+} inkbird_co2_thresholds_t;
+
+/**
  * @brief Initialize BLE subsystem for Inkbird sensors
  *
  * Initializes the NimBLE stack and prepares for scanning/connecting.
@@ -242,6 +251,14 @@ const char *inkbird_ble_get_sensor_name(uint8_t index);
  * @return true if sensor is enabled, false otherwise
  */
 bool inkbird_ble_is_sensor_enabled(uint8_t index);
+
+/**
+ * @brief Get CO2 thresholds synced from sensor
+ *
+ * @param index Sensor index (0 to INKBIRD_SENSOR_COUNT-1)
+ * @return CO2 threshold structure (check valid flag)
+ */
+inkbird_co2_thresholds_t inkbird_ble_get_thresholds(uint8_t index);
 
 #ifdef __cplusplus
 }

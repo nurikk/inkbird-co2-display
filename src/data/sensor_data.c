@@ -78,11 +78,17 @@ void sensor_data_add_history(uint8_t index, uint16_t co2_ppm)
 
 co2_status_t sensor_data_get_co2_status(uint16_t co2_ppm)
 {
-    if (co2_ppm < CO2_LEVEL_GOOD) {
+    return sensor_data_get_co2_status_ex(co2_ppm, CO2_LEVEL_GOOD_DEFAULT, CO2_LEVEL_WARNING_DEFAULT);
+}
+
+co2_status_t sensor_data_get_co2_status_ex(uint16_t co2_ppm, uint16_t low_ppm, uint16_t high_ppm)
+{
+    uint16_t mid = (low_ppm + high_ppm) / 2;
+    if (co2_ppm < low_ppm) {
         return CO2_STATUS_GOOD;
-    } else if (co2_ppm < CO2_LEVEL_MODERATE) {
+    } else if (co2_ppm < mid) {
         return CO2_STATUS_MODERATE;
-    } else if (co2_ppm < CO2_LEVEL_WARNING) {
+    } else if (co2_ppm < high_ppm) {
         return CO2_STATUS_WARNING;
     } else {
         return CO2_STATUS_ALERT;

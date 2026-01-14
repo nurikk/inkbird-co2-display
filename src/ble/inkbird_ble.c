@@ -70,6 +70,9 @@ static const uint8_t CMD_HISTORY_STOP[]  = {0x55, 0xAA, 0x07, 0x06, 0x01, 0x0D};
 // Sensor readings storage
 static inkbird_reading_t s_readings[INKBIRD_SENSOR_COUNT];
 
+// CO2 thresholds synced from sensors
+static inkbird_co2_thresholds_t s_thresholds[INKBIRD_SENSOR_COUNT];
+
 // Failure tracking for each sensor
 static uint8_t s_failure_count[INKBIRD_SENSOR_COUNT];
 static uint8_t s_skip_cycles[INKBIRD_SENSOR_COUNT];
@@ -163,8 +166,9 @@ esp_err_t inkbird_ble_init(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize readings
+    // Initialize readings and thresholds
     memset(s_readings, 0, sizeof(s_readings));
+    memset(s_thresholds, 0, sizeof(s_thresholds));
     memset(s_failure_count, 0, sizeof(s_failure_count));
     memset(s_skip_cycles, 0, sizeof(s_skip_cycles));
 
@@ -543,6 +547,20 @@ bool inkbird_ble_is_sensor_enabled(uint8_t index)
         return false;
     }
     return INKBIRD_SENSORS[index].enabled;
+}
+
+inkbird_co2_thresholds_t inkbird_ble_get_thresholds(uint8_t index)
+{
+    inkbird_co2_thresholds_t thresholds = {0};
+    if (index >= INKBIRD_SENSOR_COUNT) {
+        return thresholds;
+    }
+    if (s_ble_mutex != NULL) {
+        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+        thresholds = s_thresholds[index];
+        xSemaphoreGive(s_ble_mutex);
+    }
+    return thresholds;
 }
 
 // ============================================================================
@@ -992,12 +1010,35 @@ static void parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
     }
 
     // Response format: 55 AA [cmd] [len] [data...]
-    // Command 0x01 = Real-time data response (the one we want)
-    // Commands 0x02-0x05 = Settings/thresholds (ignore these)
-    if (len >= 13 && data[0] == 0x55 && data[1] == 0xAA) {
+    // Command 0x01 = Real-time data response
+    // Command 0x03 = CO2 threshold settings
+    if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA) {
         uint8_t cmd_id = data[2];
-        if (cmd_id != 0x01) {
-            ESP_LOGD(TAG, "Ignoring non-data response (cmd=0x%02X)", cmd_id);
+
+        // Parse CO2 thresholds (cmd 0x03)
+        // Format: 55 AA 03 0E [norm_high] [norm_low] [plant_high] [plant_low] [reset] [checksum]
+        // Bytes 4-5: Normal mode high threshold
+        // Bytes 6-7: Normal mode low threshold
+        // Bytes 8-9: Plant mode high threshold
+        // Bytes 10-11: Plant mode low threshold
+        // We use plant mode thresholds as they're typically user-configured
+        if (cmd_id == 0x03 && len >= 12 && s_ble_mutex != NULL) {
+            uint16_t plant_high = ((uint16_t)data[8] << 8) | data[9];
+            uint16_t plant_low = ((uint16_t)data[10] << 8) | data[11];
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            s_thresholds[sensor_idx].high_ppm = plant_high;
+            s_thresholds[sensor_idx].low_ppm = plant_low;
+            s_thresholds[sensor_idx].valid = true;
+            xSemaphoreGive(s_ble_mutex);
+            ESP_LOGI(TAG, "Sensor %d thresholds synced: low=%u, high=%u ppm",
+                     sensor_idx, plant_low, plant_high);
+            return;
+        }
+
+        if (cmd_id != 0x01 || len < 13) {
+            if (cmd_id != 0x01) {
+                ESP_LOGD(TAG, "Ignoring cmd 0x%02X", cmd_id);
+            }
             return;
         }
         ESP_LOGI(TAG, "Parsing real-time data response (cmd=0x01)");

@@ -325,7 +325,17 @@ void ui_co2_display_update(void)
 
         lv_label_set_text(s_name_labels[i], sensor->name);
 
-        co2_status_t status = sensor->connected ? sensor_data_get_co2_status(sensor->current.co2_ppm) : CO2_STATUS_OFFLINE;
+        co2_status_t status;
+        if (!sensor->connected) {
+            status = CO2_STATUS_OFFLINE;
+        } else {
+            inkbird_co2_thresholds_t th = inkbird_ble_get_thresholds(i);
+            if (th.valid) {
+                status = sensor_data_get_co2_status_ex(sensor->current.co2_ppm, th.low_ppm, th.high_ppm);
+            } else {
+                status = sensor_data_get_co2_status(sensor->current.co2_ppm);
+            }
+        }
         const char *status_text = sensor_data_get_status_text(status);
         lv_color_t status_col = status_color(status);
 
