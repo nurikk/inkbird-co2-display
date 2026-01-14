@@ -83,7 +83,7 @@ static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
         { .cmd = 0xF0, .data = { 0xC3 }, .data_bytes = 1 },
         { .cmd = 0xF0, .data = { 0x96 }, .data_bytes = 1 },
 
-        { .cmd = 0x36, .data = { 0x80 }, .data_bytes = 1 },
+        { .cmd = 0x36, .data = { 0xE0 }, .data_bytes = 1 },
         { .cmd = 0x3A, .data = { 0x55 }, .data_bytes = 1 },
         { .cmd = 0xB4, .data = { 0x01 }, .data_bytes = 1 },
         { .cmd = 0xB6, .data = { 0x80, 0x02, 0x3B }, .data_bytes = 3 },

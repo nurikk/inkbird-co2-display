@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #ifndef SCREEN_ROTATE
-#define SCREEN_ROTATE 0
+#define SCREEN_ROTATE 1
 #endif
 
 #if (SCREEN_ROTATE == 1 || SCREEN_ROTATE == 3)

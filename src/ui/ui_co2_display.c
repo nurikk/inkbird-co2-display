@@ -200,8 +200,8 @@ static void create_ui(void)
     lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    int tile_w = (320 - GRID_GAP) / GRID_COLS;
-    int tile_h = (480 - GRID_GAP) / GRID_ROWS;
+    int tile_w = (480 - GRID_GAP) / GRID_COLS;
+    int tile_h = (320 - GRID_GAP) / GRID_ROWS;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
         int col = i % GRID_COLS;
@@ -218,7 +218,7 @@ void ui_co2_display_init(void)
 {
     lv_init();
 
-    s_display = lv_display_create(320, 480);
+    s_display = lv_display_create(480, 320);
     lv_display_set_default(s_display);
     lv_display_set_color_format(s_display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(s_display, lvgl_flush_cb);
@@ -233,7 +233,7 @@ void ui_co2_display_init(void)
     );
     lv_display_set_theme(s_display, theme);
 
-    size_t buf_pixels = 320 * LVGL_BUFFER_LINES;
+    size_t buf_pixels = 480 * LVGL_BUFFER_LINES;
     size_t buf_size = buf_pixels * sizeof(lv_color_t);
 
     s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
