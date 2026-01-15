@@ -415,6 +415,9 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
 
+    // ========== STAGE 1: Initialize display and render loading screen ==========
+    ESP_LOGI(TAG, "[Stage 1] Initializing display subsystem...");
+
     ESP_LOGI(TAG, "Initializing LED...");
     led_init();
 
@@ -425,41 +428,21 @@ void app_main(void)
         return;
     }
 
-    // Initialize sensor data module
     ESP_LOGI(TAG, "Initializing sensor data...");
     sensor_data_init();
 
-    // Initialize UI first (with empty tiles)
     ESP_LOGI(TAG, "Initializing UI...");
     ui_co2_display_init();
-    ESP_LOGI(TAG, "UI initialized - check serial for touch status");
 
-    // Initialize BLE for Inkbird sensors
-    ESP_LOGI(TAG, "Initializing Bluetooth for Inkbird sensors...");
-    ret = inkbird_ble_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE init failed!");
-        return;
+    ESP_LOGI(TAG, "Showing loading screen...");
+    ui_co2_display_loading();
+    ui_co2_display_set_status("Starting...");
+
+    for (int i = 0; i < 5; i++) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
-
-    // Run discovery to find all nearby Inkbird sensors
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Discovering Inkbird Sensors...");
-    ESP_LOGI(TAG, "========================================");
-    inkbird_ble_discover();
-
-    // Register any newly discovered sensors to active list
-    inkbird_ble_register_discovered();
-
-    // Get active sensor count and set up sensor names
-    uint8_t active_count = inkbird_ble_get_active_count();
-    ESP_LOGI(TAG, "Active sensors: %d", active_count);
-
-    for (int i = 0; i < active_count; i++) {
-        sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
-        sensor_data_set_status(i, "Waiting...");
-    }
+    ESP_LOGI(TAG, "[Stage 1] Display ready - loading screen visible");
 
     ESP_LOGI(TAG, "Starting display task on core %d...", CORE_DISPLAY);
     xTaskCreatePinnedToCore(
@@ -471,9 +454,40 @@ void app_main(void)
         NULL,
         CORE_DISPLAY
     );
-
-    // Initial display refresh to show tiles with status
     vTaskDelay(pdMS_TO_TICKS(100));
+
+    // ========== STAGE 2: Initialize BLE stack ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[Stage 2] Initializing Bluetooth...");
+    ui_co2_display_set_status("Init BLE...");
+    s_do_refresh = true;
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ret = inkbird_ble_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLE init failed!");
+        ui_co2_display_set_status("BLE Failed!");
+        return;
+    }
+    ESP_LOGI(TAG, "[Stage 2] BLE initialized");
+
+    // ========== STAGE 3: Discover sensors ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[Stage 3] Discovering sensors...");
+    ui_co2_display_set_status("Scanning...");
+    s_do_refresh = true;
+
+    inkbird_ble_discover();
+    inkbird_ble_register_discovered();
+
+    uint8_t active_count = inkbird_ble_get_active_count();
+    ESP_LOGI(TAG, "[Stage 3] Found %d active sensors", active_count);
+
+    for (int i = 0; i < active_count; i++) {
+        sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
+        sensor_data_set_status(i, "Waiting...");
+    }
+
     s_do_refresh = true;
     vTaskDelay(pdMS_TO_TICKS(200));
 
