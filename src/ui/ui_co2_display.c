@@ -325,6 +325,13 @@ static void update_detail_screen(int sensor_idx)
         return;
     }
 
+    for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+        s_detail_co2_data[j] = LV_CHART_POINT_NONE;
+        s_detail_temp_data[j] = LV_CHART_POINT_NONE;
+        s_detail_hum_data[j] = LV_CHART_POINT_NONE;
+        s_detail_pres_data[j] = LV_CHART_POINT_NONE;
+    }
+
     lv_label_set_text(s_detail_name_label, sensor->name);
 
     co2_status_t status;
@@ -438,9 +445,7 @@ static void update_detail_screen(int sensor_idx)
         lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
     }
 
-    if (s_selected_metric != -1) {
-        update_metric_selection();
-    }
+    update_metric_selection();
 
     uint16_t total_mins = sensor_data_get_total_minutes(sensor_idx);
     if (total_mins > 0 && s_detail_x_labels[0] != NULL) {
