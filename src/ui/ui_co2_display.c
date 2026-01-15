@@ -191,6 +191,7 @@ static lv_obj_t *s_detail_chart_container = NULL;
 static int s_plot_left_x = 2;
 static int s_plot_right_x = 0;
 static lv_obj_t *s_detail_x_labels[3] = {NULL, NULL, NULL};
+static int s_y_label_positions[5];
 
 static void format_time_label(uint16_t minutes, char *buf, size_t buf_size)
 {
@@ -339,12 +340,11 @@ static void update_metric_selection(void)
 
             if (show) {
                 lv_obj_clear_flag(all_labels[m][i], LV_OBJ_FLAG_HIDDEN);
+                int y_pos = s_y_label_positions[i];
                 if (s_selected_metric != -1) {
-                    lv_coord_t y = lv_obj_get_y(all_labels[m][i]);
-                    lv_obj_set_pos(all_labels[m][i], s_plot_left_x, y);
+                    lv_obj_set_pos(all_labels[m][i], s_plot_left_x, y_pos);
                 } else if (m == 1) {
-                    lv_coord_t y = lv_obj_get_y(all_labels[m][i]);
-                    lv_obj_set_pos(all_labels[m][i], s_plot_right_x, y);
+                    lv_obj_set_pos(all_labels[m][i], s_plot_right_x, y_pos);
                 }
             } else {
                 lv_obj_add_flag(all_labels[m][i], LV_OBJ_FLAG_HIDDEN);
@@ -629,13 +629,13 @@ static void create_detail_screen(void)
     lv_obj_set_style_border_width(chart_container, 0, 0);
     lv_obj_set_style_pad_all(chart_container, 0, 0);
     lv_obj_clear_flag(chart_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_layout(chart_container, LV_LAYOUT_NONE, 0);
 
     int plot_top = PLOT_MARGIN_TOP;
     int plot_bottom = chart_container_h - PLOT_MARGIN_BOTTOM;
     int plot_left = PLOT_MARGIN_LEFT;
     int plot_right = chart_container_w - PLOT_MARGIN_RIGHT;
     s_plot_left_x = PLOT_Y_LABEL_X;
-    s_plot_right_x = plot_right + PLOT_Y_LABEL_RIGHT_OFFSET;
 
     s_detail_chart = lv_chart_create(chart_container);
     lv_obj_set_pos(s_detail_chart, plot_left, plot_top);
@@ -662,6 +662,9 @@ static void create_detail_screen(void)
 
     int chart_h = plot_bottom - plot_top;
     int y_div = chart_h / 4;
+    for (int i = 0; i < 5; i++) {
+        s_y_label_positions[i] = plot_top + i * y_div - PLOT_Y_LABEL_OFFSET;
+    }
     const char *y_labels[] = {"1.6k", "1.3k", "1k", "700", "400"};
     uint32_t co2_colors[] = {0xFF4757, 0xFF8C32, 0xFFD93D, 0x7ED321, 0x3FB950};
     for (int i = 0; i < 5; i++) {
@@ -675,12 +678,13 @@ static void create_detail_screen(void)
 
     const char *y_temp_labels[] = {"30", "26", "22", "18", "15"};
     uint32_t temp_colors[] = {0xFF8C32, 0xFFD93D, 0x7ED321, 0x60CDE4, 0x29B6F6};
+    int temp_label_x = chart_container_w - 24;
     for (int i = 0; i < 5; i++) {
         lv_obj_t *yt_lbl = lv_label_create(chart_container);
         lv_obj_set_style_text_color(yt_lbl, lv_color_hex(temp_colors[i]), 0);
         lv_obj_set_style_text_font(yt_lbl, &lv_font_montserrat_12, 0);
         lv_label_set_text(yt_lbl, y_temp_labels[i]);
-        lv_obj_set_pos(yt_lbl, plot_right + PLOT_Y_LABEL_RIGHT_OFFSET, plot_top + i * y_div - PLOT_Y_LABEL_OFFSET);
+        lv_obj_set_pos(yt_lbl, temp_label_x, s_y_label_positions[i]);
         s_detail_y_labels_temp[i] = yt_lbl;
     }
 
@@ -690,7 +694,7 @@ static void create_detail_screen(void)
         lv_obj_set_style_text_color(yh_lbl, lv_color_hex(COLOR_HUMIDITY), 0);
         lv_obj_set_style_text_font(yh_lbl, &lv_font_montserrat_12, 0);
         lv_label_set_text(yh_lbl, y_hum_labels[i]);
-        lv_obj_set_pos(yh_lbl, plot_right + PLOT_Y_LABEL_RIGHT_OFFSET, plot_top + i * y_div - PLOT_Y_LABEL_OFFSET);
+        lv_obj_set_pos(yh_lbl, temp_label_x, plot_top + i * y_div - PLOT_Y_LABEL_OFFSET);
         s_detail_y_labels_hum[i] = yh_lbl;
         lv_obj_add_flag(yh_lbl, LV_OBJ_FLAG_HIDDEN);
     }
@@ -701,10 +705,12 @@ static void create_detail_screen(void)
         lv_obj_set_style_text_color(yp_lbl, lv_color_hex(COLOR_PRESSURE), 0);
         lv_obj_set_style_text_font(yp_lbl, &lv_font_montserrat_12, 0);
         lv_label_set_text(yp_lbl, y_pres_labels[i]);
-        lv_obj_set_pos(yp_lbl, plot_right + PLOT_Y_LABEL_RIGHT_OFFSET, plot_top + i * y_div - PLOT_Y_LABEL_OFFSET);
+        lv_obj_set_pos(yp_lbl, temp_label_x, plot_top + i * y_div - PLOT_Y_LABEL_OFFSET);
         s_detail_y_labels_pres[i] = yp_lbl;
         lv_obj_add_flag(yp_lbl, LV_OBJ_FLAG_HIDDEN);
     }
+
+    s_plot_right_x = temp_label_x;
 
     int chart_w = plot_right - plot_left;
     s_detail_x_labels[0] = lv_label_create(chart_container);
