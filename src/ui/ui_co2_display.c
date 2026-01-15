@@ -39,18 +39,42 @@ static touch_type_t s_touch_type = TOUCH_TYPE_NONE;
 #define DETAIL_CHART_HEIGHT 80
 #define DETAIL_PAD 10
 
-#define COLOR_BG_DARK       0x1A1A2E
-#define COLOR_TILE_BG       0x16213E
+#define DETAIL_CHART_Y_MIN 400
+#define DETAIL_CHART_Y_MAX 1600
+#define DETAIL_CHART_Y_RANGE (DETAIL_CHART_Y_MAX - DETAIL_CHART_Y_MIN)
+
+#define TEMP_MIN_TENTHS 150
+#define TEMP_MAX_TENTHS 300
+#define TEMP_RANGE_TENTHS (TEMP_MAX_TENTHS - TEMP_MIN_TENTHS)
+
+#define HUM_MIN_PERCENT 20
+#define HUM_MAX_PERCENT 80
+#define HUM_RANGE_PERCENT (HUM_MAX_PERCENT - HUM_MIN_PERCENT)
+
+#define PRES_MIN_HPA 950
+#define PRES_MAX_HPA 1050
+#define PRES_RANGE_HPA (PRES_MAX_HPA - PRES_MIN_HPA)
+
+#define CO2_MIN_PPM 400
+#define CO2_MAX_PPM 1600
+
+#define COLOR_BG_DARK       0x0D1117
+#define COLOR_TILE_BG       0x161B22
 #define COLOR_TILE_BORDER   0x0F3460
-#define COLOR_TEXT_PRIMARY  0xFFFFFF
-#define COLOR_TEXT_MUTED    0x8892A0
-#define COLOR_GOOD          0x00D26A
+#define COLOR_TEXT_PRIMARY  0xE6EDF3
+#define COLOR_TEXT_MUTED    0x8B949E
+#define COLOR_TEXT_DIM      0x586069
+#define COLOR_GOOD          0x3FB950
 #define COLOR_MODERATE      0xFFD93D
 #define COLOR_WARNING       0xFF8C32
 #define COLOR_ALERT         0xFF4757
 #define COLOR_OFFLINE       0x4A5568
-#define COLOR_TEMP          0xFF9800
-#define COLOR_HUMIDITY      0x29B6F6
+#define COLOR_TEMP          0xFFA657
+#define COLOR_HUMIDITY      0x60CDE4
+#define COLOR_PRESSURE      0xB48CFF
+#define COLOR_ACCENT_BLUE   0x58A6FF
+#define COLOR_BG_CHART      0x11151C
+#define COLOR_GRID_LINE     0x232830
 
 static const char *TAG = "ui";
 
@@ -80,18 +104,23 @@ static bool s_ui_created = false;
 static lv_obj_t *s_loading_status_label = NULL;
 
 static lv_obj_t *s_detail_name_label = NULL;
-static lv_obj_t *s_detail_co2_label = NULL;
-static lv_obj_t *s_detail_co2_unit = NULL;
-static lv_obj_t *s_detail_temp_label = NULL;
-static lv_obj_t *s_detail_hum_label = NULL;
-static lv_obj_t *s_detail_status_label = NULL;
+static lv_obj_t *s_detail_co2_card = NULL;
+static lv_obj_t *s_detail_co2_value = NULL;
+static lv_obj_t *s_detail_temp_card = NULL;
+static lv_obj_t *s_detail_temp_value = NULL;
+static lv_obj_t *s_detail_hum_card = NULL;
+static lv_obj_t *s_detail_hum_value = NULL;
+static lv_obj_t *s_detail_pres_card = NULL;
+static lv_obj_t *s_detail_pres_value = NULL;
 static lv_obj_t *s_detail_chart = NULL;
 static lv_chart_series_t *s_detail_co2_series = NULL;
 static lv_chart_series_t *s_detail_temp_series = NULL;
 static lv_chart_series_t *s_detail_hum_series = NULL;
+static lv_chart_series_t *s_detail_pres_series = NULL;
 static int32_t s_detail_co2_data[SENSOR_HISTORY_SIZE];
 static int32_t s_detail_temp_data[SENSOR_HISTORY_SIZE];
 static int32_t s_detail_hum_data[SENSOR_HISTORY_SIZE];
+static int32_t s_detail_pres_data[SENSOR_HISTORY_SIZE];
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -202,33 +231,33 @@ static void update_detail_screen(int sensor_idx)
     }
 
     lv_color_t col = status_color(status);
-    const char *status_text = sensor_data_get_status_text(status);
-    lv_label_set_text(s_detail_status_label, status_text);
-    lv_obj_set_style_bg_color(s_detail_status_label, col, 0);
 
     if (sensor->connected) {
-        char co2_str[16];
-        snprintf(co2_str, sizeof(co2_str), "%u", sensor->current.co2_ppm);
-        lv_label_set_text(s_detail_co2_label, co2_str);
-        lv_obj_set_style_text_color(s_detail_co2_label, col, 0);
+        char co2_str[24];
+        snprintf(co2_str, sizeof(co2_str), "%u ppm", sensor->current.co2_ppm);
+        lv_label_set_text(s_detail_co2_value, co2_str);
 
         int temp_whole = sensor->current.temperature / 10;
         int temp_frac = sensor->current.temperature % 10;
         if (temp_frac < 0) temp_frac = -temp_frac;
-        char temp_str[32];
-        snprintf(temp_str, sizeof(temp_str), "%d.%d\xC2\xB0" "C", temp_whole, temp_frac);
-        lv_label_set_text(s_detail_temp_label, temp_str);
+        char temp_str[24];
+        snprintf(temp_str, sizeof(temp_str), "%d.%d \xC2\xB0" "C", temp_whole, temp_frac);
+        lv_label_set_text(s_detail_temp_value, temp_str);
 
         int hum_whole = sensor->current.humidity / 10;
         int hum_frac = sensor->current.humidity % 10;
-        char hum_str[32];
-        snprintf(hum_str, sizeof(hum_str), "%d.%d%%", hum_whole, hum_frac);
-        lv_label_set_text(s_detail_hum_label, hum_str);
+        char hum_str[24];
+        snprintf(hum_str, sizeof(hum_str), "%d.%d %%", hum_whole, hum_frac);
+        lv_label_set_text(s_detail_hum_value, hum_str);
+
+        char pres_str[24];
+        snprintf(pres_str, sizeof(pres_str), "%u hPa", sensor->current.pressure);
+        lv_label_set_text(s_detail_pres_value, pres_str);
     } else {
-        lv_label_set_text(s_detail_co2_label, "---");
-        lv_obj_set_style_text_color(s_detail_co2_label, lv_color_hex(COLOR_OFFLINE), 0);
-        lv_label_set_text(s_detail_temp_label, "--.- C");
-        lv_label_set_text(s_detail_hum_label, "--%");
+        lv_label_set_text(s_detail_co2_value, "--- ppm");
+        lv_label_set_text(s_detail_temp_value, "--.- \xC2\xB0" "C");
+        lv_label_set_text(s_detail_hum_value, "--.- %");
+        lv_label_set_text(s_detail_pres_value, "---- hPa");
     }
 
     uint8_t history_count = 0;
@@ -246,13 +275,13 @@ static void update_detail_screen(int sensor_idx)
         for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
             int16_t t = temp_hist[j];
             int32_t val;
-            if (t <= 0 || t < 100 || t > 500) {
-                val = 400;
+            if (t <= 0 || t < TEMP_MIN_TENTHS - 50 || t > TEMP_MAX_TENTHS + 100) {
+                val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
             } else {
-                val = ((t - 100) * 4) + 400;
+                val = DETAIL_CHART_Y_MIN + ((t - TEMP_MIN_TENTHS) * DETAIL_CHART_Y_RANGE / TEMP_RANGE_TENTHS);
             }
-            if (val < 400) val = 400;
-            if (val > 2000) val = 2000;
+            if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+            if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
             s_detail_temp_data[j] = val;
         }
         lv_chart_set_series_values(s_detail_chart, s_detail_temp_series, s_detail_temp_data, SENSOR_HISTORY_SIZE);
@@ -263,17 +292,64 @@ static void update_detail_screen(int sensor_idx)
         for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
             int16_t h = hum_hist[j];
             int32_t val;
-            if (h <= 0 || h > 1000) {
-                val = 400;
+            if (h <= 0 || h > 100) {
+                val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
             } else {
-                val = ((h * 16) / 10) + 400;
+                val = DETAIL_CHART_Y_MIN + ((h - HUM_MIN_PERCENT) * DETAIL_CHART_Y_RANGE / HUM_RANGE_PERCENT);
             }
-            if (val < 400) val = 400;
-            if (val > 2000) val = 2000;
+            if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+            if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
             s_detail_hum_data[j] = val;
         }
         lv_chart_set_series_values(s_detail_chart, s_detail_hum_series, s_detail_hum_data, SENSOR_HISTORY_SIZE);
     }
+
+    const int16_t *pres_hist = sensor_data_get_pres_history(sensor_idx, &history_count);
+    if (history_count > 1 && pres_hist != NULL) {
+        for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+            int16_t p = pres_hist[j];
+            int32_t val;
+            if (p <= 0 || p < PRES_MIN_HPA || p > PRES_MAX_HPA) {
+                val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
+            } else {
+                val = DETAIL_CHART_Y_MIN + ((p - PRES_MIN_HPA) * DETAIL_CHART_Y_RANGE / PRES_RANGE_HPA);
+            }
+            if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+            if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
+            s_detail_pres_data[j] = val;
+        }
+        lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
+    }
+}
+
+static lv_obj_t *create_metric_card(lv_obj_t *parent, int x, int y, int w, int h,
+                                     uint32_t color, const char *label)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_TILE_BG), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 6, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *bar = lv_obj_create(card);
+    lv_obj_set_pos(bar, 4, 3);
+    lv_obj_set_size(bar, w - 8, 3);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(bar, 1, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(lbl, label);
+    lv_obj_set_pos(lbl, 6, h - 18);
+
+    return card;
 }
 
 static void create_detail_screen(void)
@@ -283,143 +359,137 @@ static void create_detail_screen(void)
     lv_obj_set_style_bg_opa(s_detail_screen, LV_OPA_COVER, 0);
     lv_obj_clear_flag(s_detail_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *back_btn = lv_button_create(s_detail_screen);
-    lv_obj_set_size(back_btn, 80, 36);
-    lv_obj_set_pos(back_btn, DETAIL_PAD, DETAIL_PAD);
-    lv_obj_set_style_bg_color(back_btn, lv_color_hex(COLOR_TILE_BG), 0);
-    lv_obj_set_style_radius(back_btn, 8, 0);
+    lv_obj_t *back_btn = lv_label_create(s_detail_screen);
+    lv_label_set_text(back_btn, "< Back");
+    lv_obj_set_style_text_color(back_btn, lv_color_hex(COLOR_ACCENT_BLUE), 0);
+    lv_obj_set_style_text_font(back_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(back_btn, 16, 10);
+    lv_obj_add_flag(back_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back_btn, back_btn_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *back_label = lv_label_create(back_btn);
-    lv_label_set_text(back_label, LV_SYMBOL_LEFT " Back");
-    lv_obj_set_style_text_color(back_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_center(back_label);
 
     s_detail_name_label = lv_label_create(s_detail_screen);
     lv_obj_set_style_text_color(s_detail_name_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(s_detail_name_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(s_detail_name_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(s_detail_name_label, "Sensor");
-    lv_obj_align(s_detail_name_label, LV_ALIGN_TOP_MID, 0, DETAIL_PAD);
+    lv_obj_align(s_detail_name_label, LV_ALIGN_TOP_MID, 0, 8);
 
-    s_detail_status_label = lv_label_create(s_detail_screen);
-    lv_label_set_text(s_detail_status_label, "[OK]");
-    lv_obj_set_style_text_color(s_detail_status_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(s_detail_status_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(s_detail_status_label, lv_color_hex(COLOR_GOOD), 0);
-    lv_obj_set_style_bg_opa(s_detail_status_label, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_detail_status_label, 6, 0);
-    lv_obj_set_style_pad_left(s_detail_status_label, 8, 0);
-    lv_obj_set_style_pad_right(s_detail_status_label, 8, 0);
-    lv_obj_set_style_pad_top(s_detail_status_label, 4, 0);
-    lv_obj_set_style_pad_bottom(s_detail_status_label, 4, 0);
-    lv_obj_set_pos(s_detail_status_label, 480 - DETAIL_PAD - 80, DETAIL_PAD + 4);
+    int cards_y = 36;
+    int card_h = 52;
+    int card_w = 108;
+    int gap = 8;
+    int total_w = (card_w * 4) + (gap * 3);
+    int start_x = (480 - total_w) / 2;
 
-    lv_obj_t *co2_container = lv_obj_create(s_detail_screen);
-    lv_obj_set_size(co2_container, 460, 100);
-    lv_obj_set_pos(co2_container, DETAIL_PAD, 50);
-    lv_obj_set_style_bg_color(co2_container, lv_color_hex(COLOR_TILE_BG), 0);
-    lv_obj_set_style_bg_opa(co2_container, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(co2_container, 12, 0);
-    lv_obj_set_style_border_width(co2_container, 0, 0);
-    lv_obj_clear_flag(co2_container, LV_OBJ_FLAG_SCROLLABLE);
+    s_detail_co2_card = create_metric_card(s_detail_screen, start_x, cards_y, card_w, card_h, COLOR_GOOD, "CO2");
+    s_detail_co2_value = lv_label_create(s_detail_co2_card);
+    lv_obj_set_style_text_color(s_detail_co2_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(s_detail_co2_value, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_detail_co2_value, "--- ppm");
+    lv_obj_set_pos(s_detail_co2_value, 6, 12);
 
-    s_detail_co2_label = lv_label_create(co2_container);
-    lv_obj_set_style_text_color(s_detail_co2_label, lv_color_hex(COLOR_GOOD), 0);
-    lv_obj_set_style_text_font(s_detail_co2_label, &lv_font_montserrat_48, 0);
-    lv_label_set_text(s_detail_co2_label, "---");
-    lv_obj_align(s_detail_co2_label, LV_ALIGN_LEFT_MID, 20, 0);
+    s_detail_temp_card = create_metric_card(s_detail_screen, start_x + card_w + gap, cards_y, card_w, card_h, COLOR_TEMP, "TEMP");
+    s_detail_temp_value = lv_label_create(s_detail_temp_card);
+    lv_obj_set_style_text_color(s_detail_temp_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(s_detail_temp_value, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_detail_temp_value, "--.- \xC2\xB0" "C");
+    lv_obj_set_pos(s_detail_temp_value, 6, 12);
 
-    s_detail_co2_unit = lv_label_create(co2_container);
-    lv_obj_set_style_text_color(s_detail_co2_unit, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(s_detail_co2_unit, &lv_font_montserrat_14, 0);
-    lv_label_set_text(s_detail_co2_unit, "ppm");
-    lv_obj_align_to(s_detail_co2_unit, s_detail_co2_label, LV_ALIGN_OUT_BOTTOM_LEFT, 5, 4);
+    s_detail_hum_card = create_metric_card(s_detail_screen, start_x + 2 * (card_w + gap), cards_y, card_w, card_h, COLOR_HUMIDITY, "HUMIDITY");
+    s_detail_hum_value = lv_label_create(s_detail_hum_card);
+    lv_obj_set_style_text_color(s_detail_hum_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(s_detail_hum_value, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_detail_hum_value, "--.- %");
+    lv_obj_set_pos(s_detail_hum_value, 6, 12);
 
-    s_detail_temp_label = lv_label_create(co2_container);
-    lv_obj_set_style_text_color(s_detail_temp_label, lv_color_hex(COLOR_TEMP), 0);
-    lv_obj_set_style_text_font(s_detail_temp_label, &lv_font_montserrat_28, 0);
-    lv_label_set_text(s_detail_temp_label, "--.-\xC2\xB0" "C");
-    lv_obj_align(s_detail_temp_label, LV_ALIGN_RIGHT_MID, -10, -20);
+    s_detail_pres_card = create_metric_card(s_detail_screen, start_x + 3 * (card_w + gap), cards_y, card_w, card_h, COLOR_PRESSURE, "PRESSURE");
+    s_detail_pres_value = lv_label_create(s_detail_pres_card);
+    lv_obj_set_style_text_color(s_detail_pres_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(s_detail_pres_value, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_detail_pres_value, "---- hPa");
+    lv_obj_set_pos(s_detail_pres_value, 6, 12);
 
-    s_detail_hum_label = lv_label_create(co2_container);
-    lv_obj_set_style_text_color(s_detail_hum_label, lv_color_hex(COLOR_HUMIDITY), 0);
-    lv_obj_set_style_text_font(s_detail_hum_label, &lv_font_montserrat_28, 0);
-    lv_label_set_text(s_detail_hum_label, "--.-%");
-    lv_obj_align(s_detail_hum_label, LV_ALIGN_RIGHT_MID, -10, 20);
+    int chart_container_top = 92;
+    int chart_container_h = 320 - chart_container_top - 8;
 
-    int chart_y = 155;
+    lv_obj_t *chart_container = lv_obj_create(s_detail_screen);
+    lv_obj_set_pos(chart_container, 12, chart_container_top);
+    lv_obj_set_size(chart_container, 480 - 24, chart_container_h);
+    lv_obj_set_style_bg_color(chart_container, lv_color_hex(COLOR_BG_CHART), 0);
+    lv_obj_set_style_bg_opa(chart_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(chart_container, 8, 0);
+    lv_obj_set_style_border_width(chart_container, 0, 0);
+    lv_obj_set_style_pad_all(chart_container, 0, 0);
+    lv_obj_clear_flag(chart_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *legend = lv_obj_create(s_detail_screen);
-    lv_obj_set_size(legend, 460, 20);
-    lv_obj_set_pos(legend, DETAIL_PAD, chart_y - 22);
-    lv_obj_set_style_bg_opa(legend, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(legend, 0, 0);
-    lv_obj_set_style_pad_all(legend, 0, 0);
-    lv_obj_clear_flag(legend, LV_OBJ_FLAG_SCROLLABLE);
+    int plot_top = 8;
+    int plot_bottom = chart_container_h - 20;
+    int plot_left = 32;
+    int plot_right = 480 - 24 - 28;
 
-    lv_obj_t *co2_dot = lv_obj_create(legend);
-    lv_obj_set_size(co2_dot, 12, 12);
-    lv_obj_set_style_radius(co2_dot, 6, 0);
-    lv_obj_set_style_bg_color(co2_dot, lv_color_hex(COLOR_GOOD), 0);
-    lv_obj_set_style_bg_opa(co2_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(co2_dot, 0, 0);
-    lv_obj_align(co2_dot, LV_ALIGN_LEFT_MID, 0, 0);
-
-    lv_obj_t *co2_legend = lv_label_create(legend);
-    lv_obj_set_style_text_color(co2_legend, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(co2_legend, &lv_font_montserrat_12, 0);
-    lv_label_set_text(co2_legend, "CO2");
-    lv_obj_align_to(co2_legend, co2_dot, LV_ALIGN_OUT_RIGHT_MID, 4, 0);
-
-    lv_obj_t *temp_dot = lv_obj_create(legend);
-    lv_obj_set_size(temp_dot, 12, 12);
-    lv_obj_set_style_radius(temp_dot, 6, 0);
-    lv_obj_set_style_bg_color(temp_dot, lv_color_hex(COLOR_TEMP), 0);
-    lv_obj_set_style_bg_opa(temp_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(temp_dot, 0, 0);
-    lv_obj_align(temp_dot, LV_ALIGN_CENTER, -30, 0);
-
-    lv_obj_t *temp_legend = lv_label_create(legend);
-    lv_obj_set_style_text_color(temp_legend, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(temp_legend, &lv_font_montserrat_12, 0);
-    lv_label_set_text(temp_legend, "Temp");
-    lv_obj_align_to(temp_legend, temp_dot, LV_ALIGN_OUT_RIGHT_MID, 4, 0);
-
-    lv_obj_t *hum_dot = lv_obj_create(legend);
-    lv_obj_set_size(hum_dot, 12, 12);
-    lv_obj_set_style_radius(hum_dot, 6, 0);
-    lv_obj_set_style_bg_color(hum_dot, lv_color_hex(COLOR_HUMIDITY), 0);
-    lv_obj_set_style_bg_opa(hum_dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(hum_dot, 0, 0);
-    lv_obj_align(hum_dot, LV_ALIGN_RIGHT_MID, -70, 0);
-
-    lv_obj_t *hum_legend = lv_label_create(legend);
-    lv_obj_set_style_text_color(hum_legend, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(hum_legend, &lv_font_montserrat_12, 0);
-    lv_label_set_text(hum_legend, "Humidity");
-    lv_obj_align_to(hum_legend, hum_dot, LV_ALIGN_OUT_RIGHT_MID, 4, 0);
-
-    s_detail_chart = lv_chart_create(s_detail_screen);
-    lv_obj_set_size(s_detail_chart, 460, 110);
-    lv_obj_set_pos(s_detail_chart, DETAIL_PAD, chart_y);
-    lv_obj_set_style_bg_color(s_detail_chart, lv_color_hex(COLOR_TILE_BG), 0);
+    s_detail_chart = lv_chart_create(chart_container);
+    lv_obj_set_pos(s_detail_chart, plot_left, plot_top);
+    lv_obj_set_size(s_detail_chart, plot_right - plot_left, plot_bottom - plot_top);
+    lv_obj_set_style_bg_color(s_detail_chart, lv_color_hex(COLOR_BG_CHART), 0);
     lv_obj_set_style_bg_opa(s_detail_chart, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_detail_chart, 8, 0);
+    lv_obj_set_style_radius(s_detail_chart, 0, 0);
     lv_obj_set_style_border_width(s_detail_chart, 0, 0);
-    lv_obj_set_style_pad_all(s_detail_chart, 8, 0);
-    lv_obj_set_style_line_width(s_detail_chart, 3, LV_PART_ITEMS);
+    lv_obj_set_style_pad_all(s_detail_chart, 0, 0);
+    lv_obj_set_style_line_width(s_detail_chart, 2, LV_PART_ITEMS);
     lv_obj_set_style_size(s_detail_chart, 0, 0, LV_PART_INDICATOR);
-    lv_obj_set_style_line_color(s_detail_chart, lv_color_hex(0x2A3F5F), LV_PART_MAIN);
-    lv_obj_set_style_line_opa(s_detail_chart, LV_OPA_20, LV_PART_MAIN);
+    lv_obj_set_style_line_color(s_detail_chart, lv_color_hex(COLOR_GRID_LINE), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(s_detail_chart, LV_OPA_COVER, LV_PART_MAIN);
     lv_chart_set_type(s_detail_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_detail_chart, SENSOR_HISTORY_SIZE);
-    lv_chart_set_div_line_count(s_detail_chart, 4, 0);
-    lv_chart_set_axis_range(s_detail_chart, LV_CHART_AXIS_PRIMARY_Y, CHART_MIN_PPM, CHART_MAX_PPM);
+    lv_chart_set_div_line_count(s_detail_chart, 4, 4);
+    lv_chart_set_axis_range(s_detail_chart, LV_CHART_AXIS_PRIMARY_Y, DETAIL_CHART_Y_MIN, DETAIL_CHART_Y_MAX);
     lv_obj_clear_flag(s_detail_chart, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_detail_co2_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
-    s_detail_temp_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_TEMP), LV_CHART_AXIS_PRIMARY_Y);
+    s_detail_pres_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_PRESSURE), LV_CHART_AXIS_PRIMARY_Y);
     s_detail_hum_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_HUMIDITY), LV_CHART_AXIS_PRIMARY_Y);
+    s_detail_temp_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_TEMP), LV_CHART_AXIS_PRIMARY_Y);
+    s_detail_co2_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
+
+    int chart_h = plot_bottom - plot_top;
+    int y_div = chart_h / 4;
+    const char *y_labels[] = {"1.6k", "1.3k", "1k", "700", "400"};
+    uint32_t co2_colors[] = {0xFF4757, 0xFF8C32, 0xFFD93D, 0x7ED321, 0x3FB950};
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *y_lbl = lv_label_create(chart_container);
+        lv_obj_set_style_text_color(y_lbl, lv_color_hex(co2_colors[i]), 0);
+        lv_obj_set_style_text_font(y_lbl, &lv_font_montserrat_12, 0);
+        lv_label_set_text(y_lbl, y_labels[i]);
+        lv_obj_set_pos(y_lbl, 2, plot_top + i * y_div - 6);
+    }
+
+    const char *y_temp_labels[] = {"30", "26", "22", "18", "15"};
+    uint32_t temp_colors[] = {0xFF8C32, 0xFFD93D, 0x7ED321, 0x60CDE4, 0x29B6F6};
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *yt_lbl = lv_label_create(chart_container);
+        lv_obj_set_style_text_color(yt_lbl, lv_color_hex(temp_colors[i]), 0);
+        lv_obj_set_style_text_font(yt_lbl, &lv_font_montserrat_12, 0);
+        lv_label_set_text(yt_lbl, y_temp_labels[i]);
+        lv_obj_set_pos(yt_lbl, plot_right + 4, plot_top + i * y_div - 6);
+    }
+
+    int chart_w = plot_right - plot_left;
+    lv_obj_t *x_lbl1 = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(x_lbl1, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(x_lbl1, &lv_font_montserrat_12, 0);
+    lv_label_set_text(x_lbl1, "-60m");
+    lv_obj_set_pos(x_lbl1, plot_left, plot_bottom + 4);
+
+    lv_obj_t *x_lbl2 = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(x_lbl2, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(x_lbl2, &lv_font_montserrat_12, 0);
+    lv_label_set_text(x_lbl2, "-30m");
+    lv_obj_set_pos(x_lbl2, plot_left + chart_w / 2 - 15, plot_bottom + 4);
+
+    lv_obj_t *x_lbl3 = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(x_lbl3, lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(x_lbl3, &lv_font_montserrat_12, 0);
+    lv_label_set_text(x_lbl3, "now");
+    lv_obj_set_pos(x_lbl3, plot_right - 24, plot_bottom + 4);
+
 }
 
 static void tile_click_cb(lv_event_t *e)
