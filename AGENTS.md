@@ -230,3 +230,4 @@ The captured image can then be analyzed to diagnose rendering issues, layout pro
 2. **Upload fails**: Check USB connection, may need to hold BOOT button
 3. **Serial monitor garbled**: Ensure baud rate is 115200
 4. **Out of memory**: Reduce task stack sizes, check heap usage with `esp_get_free_heap_size()`
+5. **Boot loop after code changes**: Stale build artifacts can cause crashes (often during BLE init). Fix with a full clean rebuild: `rm -rf .pio/build && pio run -t upload`
