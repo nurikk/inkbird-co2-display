@@ -7,11 +7,12 @@
  *
  * Boot sequence:
  * 1. Initialize display and show loading screen
- * 2. Initialize BLE stack
- * 3. Discover sensors
- * 4. Read initial sensor values
- * 5. Download historical data (optional)
- * 6. Start periodic sensor polling
+ * 2. Show empty main screen (sensors in "Waiting..." state)
+ * 3. Initialize BLE stack
+ * 4. Discover sensors and update names
+ * 5. Connect to each sensor, request data + settings
+ * 6. Download historical data (optional)
+ * 7. Start periodic sensor polling
  */
 
 #include <stdio.h>
@@ -414,10 +415,29 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "[Stage 1] Display ready - loading screen visible");
 
-    // ========== STAGE 2: Initialize BLE stack ==========
+    // ========== STAGE 2: Show empty main screen ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[Stage 2] Showing main screen...");
+
+    // Set initial status for all sensors before showing main screen
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+        sensor_data_set_status(i, "Waiting...");
+    }
+
+    // Trigger main screen creation by calling update
+    ui_co2_display_update();
+
+    // Render a few frames to show the main screen
+    for (int i = 0; i < 10; i++) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGI(TAG, "[Stage 2] Main screen visible with sensors in Waiting state");
+
+    // ========== STAGE 3: Initialize BLE stack ==========
     // NOTE: Do NOT start display task yet - BLE init needs uninterrupted CPU time
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[Stage 2] Initializing Bluetooth...");
+    ESP_LOGI(TAG, "[Stage 3] Initializing Bluetooth...");
 
     for (int i = 0; i < 3; i++) {
         lv_timer_handler();
@@ -431,7 +451,7 @@ void app_main(void)
         ui_co2_display_set_status("BLE Failed!");
         return;
     }
-    ESP_LOGI(TAG, "[Stage 2] BLE initialized");
+    ESP_LOGI(TAG, "[Stage 3] BLE initialized");
 
     // Now it's safe to start display task after BLE controller is running
     ESP_LOGI(TAG, "Starting display task on core %d...", CORE_DISPLAY);
@@ -446,9 +466,9 @@ void app_main(void)
     );
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // ========== STAGE 3: Discover sensors ==========
+    // ========== STAGE 4: Discover sensors ==========
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[Stage 3] Discovering sensors...");
+    ESP_LOGI(TAG, "[Stage 4] Discovering sensors...");
     ui_co2_display_set_status("Scanning...");
     s_do_refresh = true;
 
@@ -456,7 +476,7 @@ void app_main(void)
     inkbird_ble_register_discovered();
 
     uint8_t active_count = inkbird_ble_get_active_count();
-    ESP_LOGI(TAG, "[Stage 3] Found %d active sensors", active_count);
+    ESP_LOGI(TAG, "[Stage 4] Found %d active sensors", active_count);
 
     for (int i = 0; i < active_count; i++) {
         sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
