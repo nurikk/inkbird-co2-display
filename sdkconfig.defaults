@@ -5,6 +5,10 @@ CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
 # Increase task watchdog timeout (e-paper refresh can be slow)
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
+# Increase interrupt watchdog timeout for PHY calibration during BLE init
+# Default 300ms is too short - full calibration can take 500ms+
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+
 # Enable more verbose logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
