@@ -21,6 +21,8 @@
 
 #include "lvgl.h"
 
+#include "nvs_flash.h"
+
 #include "epd_driver.h"
 #include "sensor_data.h"
 #include "ui_co2_display.h"
@@ -415,6 +417,14 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
 
+    ESP_LOGI(TAG, "Initializing NVS...");
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
     // ========== STAGE 1: Initialize display and render loading screen ==========
     ESP_LOGI(TAG, "[Stage 1] Initializing display subsystem...");
 
@@ -422,7 +432,7 @@ void app_main(void)
     led_init();
 
     ESP_LOGI(TAG, "Initializing TFT display...");
-    esp_err_t ret = epd_init();
+    ret = epd_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "TFT init failed!");
         return;
@@ -444,6 +454,26 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "[Stage 1] Display ready - loading screen visible");
 
+    // ========== STAGE 2: Initialize BLE stack ==========
+    // NOTE: Do NOT start display task yet - BLE init needs uninterrupted CPU time
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[Stage 2] Initializing Bluetooth...");
+
+    for (int i = 0; i < 3; i++) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    ESP_LOGI(TAG, "Free heap before BLE: %lu bytes", esp_get_free_heap_size());
+    ret = inkbird_ble_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLE init failed!");
+        ui_co2_display_set_status("BLE Failed!");
+        return;
+    }
+    ESP_LOGI(TAG, "[Stage 2] BLE initialized");
+
+    // Now it's safe to start display task after BLE controller is running
     ESP_LOGI(TAG, "Starting display task on core %d...", CORE_DISPLAY);
     xTaskCreatePinnedToCore(
         display_task,
@@ -455,21 +485,6 @@ void app_main(void)
         CORE_DISPLAY
     );
     vTaskDelay(pdMS_TO_TICKS(100));
-
-    // ========== STAGE 2: Initialize BLE stack ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[Stage 2] Initializing Bluetooth...");
-    ui_co2_display_set_status("Init BLE...");
-    s_do_refresh = true;
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    ret = inkbird_ble_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE init failed!");
-        ui_co2_display_set_status("BLE Failed!");
-        return;
-    }
-    ESP_LOGI(TAG, "[Stage 2] BLE initialized");
 
     // ========== STAGE 3: Discover sensors ==========
     ESP_LOGI(TAG, "");
