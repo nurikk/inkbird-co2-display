@@ -4,9 +4,13 @@
 
 #include "sdkconfig.h"
 
+#include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "lvgl.h"
 
@@ -193,6 +197,26 @@ static int s_plot_right_x = 0;
 static lv_obj_t *s_detail_x_labels[3] = {NULL, NULL, NULL};
 static int s_y_label_positions[5];
 
+// Settings screen
+static lv_obj_t *s_settings_screen = NULL;
+static bool s_settings_loading = false;
+static lv_obj_t *s_settings_status_label = NULL;
+
+// Settings UI elements
+static lv_obj_t *s_settings_mode_label = NULL;
+static lv_obj_t *s_settings_auto_cal_sw = NULL;
+static lv_obj_t *s_settings_custom_mode_sw = NULL;
+static lv_obj_t *s_settings_normal_high_label = NULL;
+static lv_obj_t *s_settings_normal_low_label = NULL;
+static lv_obj_t *s_settings_plant_high_label = NULL;
+static lv_obj_t *s_settings_plant_low_label = NULL;
+static lv_obj_t *s_settings_alarm_sw = NULL;
+static lv_obj_t *s_settings_alarm_value_label = NULL;
+static lv_obj_t *s_settings_co2_offset_label = NULL;
+static lv_obj_t *s_settings_temp_offset_label = NULL;
+static lv_obj_t *s_settings_hum_offset_label = NULL;
+static lv_obj_t *s_settings_unit_label = NULL;
+
 static void format_time_label(uint16_t minutes, char *buf, size_t buf_size)
 {
     if (minutes == 0) {
@@ -364,6 +388,415 @@ static void metric_card_click_cb(lv_event_t *e)
     }
 
     update_metric_selection();
+}
+
+// Forward declarations for settings
+static void create_settings_screen(void);
+static void update_settings_screen(void);
+
+static void settings_back_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_detail_screen != NULL) {
+        lv_screen_load(s_detail_screen);
+    }
+}
+
+static void settings_btn_event_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_selected_sensor < 0 || s_selected_sensor >= SENSOR_COUNT) {
+        return;
+    }
+
+    if (s_settings_screen == NULL) {
+        create_settings_screen();
+    }
+
+    // Show loading state
+    s_settings_loading = true;
+    update_settings_screen();
+    lv_screen_load(s_settings_screen);
+
+    // Request settings from device (this will block briefly)
+    // After we show the screen, we'll trigger the actual request
+    ESP_LOGI(TAG, "Opening settings for sensor %d", s_selected_sensor);
+}
+
+static void settings_refresh_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_selected_sensor < 0) return;
+
+    s_settings_loading = true;
+    update_settings_screen();
+
+    // Request settings in background
+    esp_err_t ret = inkbird_ble_request_settings(s_selected_sensor, 15000);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Settings synced successfully");
+    } else {
+        ESP_LOGW(TAG, "Failed to sync settings: %s", esp_err_to_name(ret));
+    }
+
+    s_settings_loading = false;
+    update_settings_screen();
+}
+
+static void update_settings_screen(void)
+{
+    if (s_settings_screen == NULL || s_selected_sensor < 0) {
+        return;
+    }
+
+    if (s_settings_loading) {
+        if (s_settings_status_label) {
+            lv_label_set_text(s_settings_status_label, "Loading settings...");
+            lv_obj_clear_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    if (s_settings_status_label) {
+        lv_obj_add_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    inkbird_device_settings_t settings = inkbird_ble_get_settings(s_selected_sensor);
+
+    // CO2 Settings
+    if (s_settings_mode_label) {
+        char mode_str[32];
+        if (settings.co2_settings.valid) {
+            snprintf(mode_str, sizeof(mode_str), "Mode: %d", settings.co2_settings.display_mode);
+        } else {
+            snprintf(mode_str, sizeof(mode_str), "Mode: --");
+        }
+        lv_label_set_text(s_settings_mode_label, mode_str);
+    }
+
+    if (s_settings_auto_cal_sw && settings.co2_settings.valid) {
+        if (settings.co2_settings.auto_calibration) {
+            lv_obj_add_state(s_settings_auto_cal_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(s_settings_auto_cal_sw, LV_STATE_CHECKED);
+        }
+    }
+
+    if (s_settings_custom_mode_sw && settings.co2_settings.valid) {
+        if (settings.co2_settings.use_custom) {
+            lv_obj_add_state(s_settings_custom_mode_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(s_settings_custom_mode_sw, LV_STATE_CHECKED);
+        }
+    }
+
+    // Thresholds
+    if (s_settings_normal_high_label) {
+        char str[24];
+        if (settings.thresholds.thresholds_valid) {
+            snprintf(str, sizeof(str), "%u ppm", settings.thresholds.normal_high_ppm);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_normal_high_label, str);
+    }
+
+    if (s_settings_normal_low_label) {
+        char str[24];
+        if (settings.thresholds.thresholds_valid) {
+            snprintf(str, sizeof(str), "%u ppm", settings.thresholds.normal_low_ppm);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_normal_low_label, str);
+    }
+
+    if (s_settings_plant_high_label) {
+        char str[24];
+        if (settings.thresholds.thresholds_valid) {
+            snprintf(str, sizeof(str), "%u ppm", settings.thresholds.plant_high_ppm);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_plant_high_label, str);
+    }
+
+    if (s_settings_plant_low_label) {
+        char str[24];
+        if (settings.thresholds.thresholds_valid) {
+            snprintf(str, sizeof(str), "%u ppm", settings.thresholds.plant_low_ppm);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_plant_low_label, str);
+    }
+
+    // Alarm
+    if (s_settings_alarm_sw && settings.alarm.valid) {
+        if (settings.alarm.enabled) {
+            lv_obj_add_state(s_settings_alarm_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(s_settings_alarm_sw, LV_STATE_CHECKED);
+        }
+    }
+
+    if (s_settings_alarm_value_label) {
+        char str[24];
+        if (settings.alarm.valid) {
+            snprintf(str, sizeof(str), "%u ppm", settings.alarm.alarm_value);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_alarm_value_label, str);
+    }
+
+    // Calibration
+    if (s_settings_co2_offset_label) {
+        char str[24];
+        if (settings.calibration.valid) {
+            snprintf(str, sizeof(str), "%+d ppm", settings.calibration.co2_offset);
+        } else {
+            snprintf(str, sizeof(str), "-- ppm");
+        }
+        lv_label_set_text(s_settings_co2_offset_label, str);
+    }
+
+    if (s_settings_temp_offset_label) {
+        char str[24];
+        if (settings.calibration.valid) {
+            int whole = settings.calibration.temp_offset / 10;
+            int frac = settings.calibration.temp_offset % 10;
+            if (frac < 0) frac = -frac;
+            snprintf(str, sizeof(str), "%+d.%d", whole, frac);
+        } else {
+            snprintf(str, sizeof(str), "--.-");
+        }
+        lv_label_set_text(s_settings_temp_offset_label, str);
+    }
+
+    if (s_settings_hum_offset_label) {
+        char str[24];
+        if (settings.calibration.valid) {
+            int whole = settings.calibration.hum_offset / 10;
+            int frac = settings.calibration.hum_offset % 10;
+            if (frac < 0) frac = -frac;
+            snprintf(str, sizeof(str), "%+d.%d%%", whole, frac);
+        } else {
+            snprintf(str, sizeof(str), "--.- %%");
+        }
+        lv_label_set_text(s_settings_hum_offset_label, str);
+    }
+
+    if (s_settings_unit_label) {
+        if (settings.calibration.valid) {
+            lv_label_set_text(s_settings_unit_label, settings.calibration.use_fahrenheit ? "Fahrenheit" : "Celsius");
+        } else {
+            lv_label_set_text(s_settings_unit_label, "--");
+        }
+    }
+}
+
+// Two-column layout constants
+#define SETTINGS_COL1_X      12
+#define SETTINGS_COL2_X      248
+#define SETTINGS_LABEL_W     100
+#define SETTINGS_VALUE_X     112  // Offset from column start for value
+
+static lv_obj_t *create_settings_row(lv_obj_t *parent, int x, int y, const char *label_text, lv_obj_t **out_value_label)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_style_text_color(label, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_pos(label, x, y);
+
+    lv_obj_t *value = lv_label_create(parent);
+    lv_obj_set_style_text_color(value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(value, &lv_font_montserrat_12, 0);
+    lv_label_set_text(value, "--");
+    lv_obj_set_pos(value, x + SETTINGS_VALUE_X, y);
+
+    if (out_value_label) {
+        *out_value_label = value;
+    }
+    return label;
+}
+
+// Switch event handlers
+static void auto_cal_switch_cb(lv_event_t *e)
+{
+    if (s_selected_sensor < 0) return;
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool checked = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    inkbird_device_settings_t settings = inkbird_ble_get_settings(s_selected_sensor);
+    ESP_LOGI(TAG, "Setting auto calibration to %d for sensor %d", checked, s_selected_sensor);
+    inkbird_ble_set_co2_mode(s_selected_sensor,
+                             settings.co2_settings.display_mode,
+                             settings.co2_settings.use_custom,
+                             checked);
+}
+
+static void custom_mode_switch_cb(lv_event_t *e)
+{
+    if (s_selected_sensor < 0) return;
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool checked = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    inkbird_device_settings_t settings = inkbird_ble_get_settings(s_selected_sensor);
+    ESP_LOGI(TAG, "Setting custom/plant mode to %d for sensor %d", checked, s_selected_sensor);
+    inkbird_ble_set_co2_mode(s_selected_sensor,
+                             settings.co2_settings.display_mode,
+                             checked,
+                             settings.co2_settings.auto_calibration);
+}
+
+static void alarm_switch_cb(lv_event_t *e)
+{
+    if (s_selected_sensor < 0) return;
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool checked = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    inkbird_device_settings_t settings = inkbird_ble_get_settings(s_selected_sensor);
+    ESP_LOGI(TAG, "Setting alarm enabled to %d for sensor %d", checked, s_selected_sensor);
+    inkbird_ble_set_alarm(s_selected_sensor,
+                          checked,
+                          settings.alarm.alarm_mode,
+                          settings.alarm.alarm_value);
+}
+
+static lv_obj_t *create_settings_switch_row(lv_obj_t *parent, int x, int y, const char *label_text, lv_obj_t **out_switch, lv_event_cb_t cb)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_style_text_color(label, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(label, label_text);
+    lv_obj_set_pos(label, x, y);
+
+    lv_obj_t *sw = lv_switch_create(parent);
+    lv_obj_set_size(sw, 40, 20);
+    lv_obj_set_pos(sw, x + SETTINGS_VALUE_X, y - 2);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_TILE_BG), 0);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_GOOD), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    if (cb != NULL) {
+        lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+
+    if (out_switch) {
+        *out_switch = sw;
+    }
+    return label;
+}
+
+static lv_obj_t *create_settings_header(lv_obj_t *parent, int x, int y, const char *text, uint32_t color)
+{
+    lv_obj_t *header = lv_label_create(parent);
+    lv_obj_set_style_text_color(header, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(header, &lv_font_montserrat_12, 0);
+    lv_label_set_text(header, text);
+    lv_obj_set_pos(header, x, y);
+    return header;
+}
+
+static void create_settings_screen(void)
+{
+    s_settings_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_settings_screen, lv_color_hex(COLOR_BG_DARK), 0);
+    lv_obj_set_style_bg_opa(s_settings_screen, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_settings_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Back button
+    lv_obj_t *back_btn = lv_label_create(s_settings_screen);
+    lv_label_set_text(back_btn, "< Back");
+    lv_obj_set_style_text_color(back_btn, lv_color_hex(COLOR_ACCENT_BLUE), 0);
+    lv_obj_set_style_text_font(back_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(back_btn, 16, 8);
+    lv_obj_add_flag(back_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(back_btn, settings_back_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // Title
+    lv_obj_t *title = lv_label_create(s_settings_screen);
+    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_label_set_text(title, "Device Settings");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+
+    // Refresh button
+    lv_obj_t *refresh_btn = lv_label_create(s_settings_screen);
+    lv_label_set_text(refresh_btn, "Sync");
+    lv_obj_set_style_text_color(refresh_btn, lv_color_hex(COLOR_ACCENT_BLUE), 0);
+    lv_obj_set_style_text_font(refresh_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(refresh_btn, UI_DISPLAY_WIDTH - 50, 8);
+    lv_obj_add_flag(refresh_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(refresh_btn, settings_refresh_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    // Status label (shown while loading)
+    s_settings_status_label = lv_label_create(s_settings_screen);
+    lv_obj_set_style_text_color(s_settings_status_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
+    lv_obj_set_style_text_font(s_settings_status_label, &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_settings_status_label, "Loading...");
+    lv_obj_align(s_settings_status_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
+
+    int row_h = 20;
+    int y1 = 32;  // Left column Y start
+    int y2 = 32;  // Right column Y start
+
+    // ==================== LEFT COLUMN ====================
+    // === CO2 Settings Section ===
+    create_settings_header(s_settings_screen, SETTINGS_COL1_X, y1, "CO2 Settings", COLOR_GOOD);
+    y1 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL1_X, y1, "Display Mode:", &s_settings_mode_label);
+    y1 += row_h;
+
+    create_settings_switch_row(s_settings_screen, SETTINGS_COL1_X, y1, "Auto Cal:", &s_settings_auto_cal_sw, auto_cal_switch_cb);
+    y1 += row_h;
+
+    create_settings_switch_row(s_settings_screen, SETTINGS_COL1_X, y1, "Plant Mode:", &s_settings_custom_mode_sw, custom_mode_switch_cb);
+    y1 += row_h + 6;
+
+    // === Thresholds Section ===
+    create_settings_header(s_settings_screen, SETTINGS_COL1_X, y1, "CO2 Thresholds", COLOR_MODERATE);
+    y1 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL1_X, y1, "Normal High:", &s_settings_normal_high_label);
+    y1 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL1_X, y1, "Normal Low:", &s_settings_normal_low_label);
+    y1 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL1_X, y1, "Plant High:", &s_settings_plant_high_label);
+    y1 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL1_X, y1, "Plant Low:", &s_settings_plant_low_label);
+
+    // ==================== RIGHT COLUMN ====================
+    // === Alarm Section ===
+    create_settings_header(s_settings_screen, SETTINGS_COL2_X, y2, "Alarm Settings", COLOR_ALERT);
+    y2 += row_h;
+
+    create_settings_switch_row(s_settings_screen, SETTINGS_COL2_X, y2, "Enabled:", &s_settings_alarm_sw, alarm_switch_cb);
+    y2 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "Threshold:", &s_settings_alarm_value_label);
+    y2 += row_h + 6;
+
+    // === Calibration Section ===
+    create_settings_header(s_settings_screen, SETTINGS_COL2_X, y2, "Calibration", COLOR_TEMP);
+    y2 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "CO2 Offset:", &s_settings_co2_offset_label);
+    y2 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "Temp Offset:", &s_settings_temp_offset_label);
+    y2 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "Hum Offset:", &s_settings_hum_offset_label);
+    y2 += row_h;
+
+    create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "Temp Unit:", &s_settings_unit_label);
 }
 
 static void back_btn_event_cb(lv_event_t *e)
@@ -565,6 +998,15 @@ static void create_detail_screen(void)
     lv_obj_set_pos(back_btn, DETAIL_BACK_BTN_X, DETAIL_BACK_BTN_Y);
     lv_obj_add_flag(back_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back_btn, back_btn_event_cb, LV_EVENT_CLICKED, NULL);
+
+    // Settings button (top-right) - use gear/cog symbol
+    lv_obj_t *settings_btn = lv_label_create(s_detail_screen);
+    lv_label_set_text(settings_btn, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_color(settings_btn, lv_color_hex(COLOR_ACCENT_BLUE), 0);
+    lv_obj_set_style_text_font(settings_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(settings_btn, UI_DISPLAY_WIDTH - 32, DETAIL_BACK_BTN_Y);
+    lv_obj_add_flag(settings_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(settings_btn, settings_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
     s_detail_name_label = lv_label_create(s_detail_screen);
     lv_obj_set_style_text_color(s_detail_name_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
@@ -1060,8 +1502,26 @@ void ui_co2_display_update(void)
                     high_ppm = th.normal_high_ppm;
                 }
                 status = sensor_data_get_co2_status_ex(sensor->current.co2_ppm, low_ppm, high_ppm);
+                // Debug: log threshold calculation every 10 seconds
+                static uint32_t last_log_time = 0;
+                uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                if (now - last_log_time > 10000) {
+                    last_log_time = now;
+                    uint16_t mid = (low_ppm + high_ppm) / 2;
+                    ESP_LOGI(TAG, "=== THRESHOLD DEBUG sensor %d ===", i);
+                    ESP_LOGI(TAG, "  CO2: %u ppm, use_custom: %d", sensor->current.co2_ppm, th.use_custom);
+                    ESP_LOGI(TAG, "  normal: %u-%u, plant: %u-%u", th.normal_low_ppm, th.normal_high_ppm, th.plant_low_ppm, th.plant_high_ppm);
+                    ESP_LOGI(TAG, "  USING: low=%u, mid=%u, high=%u -> status=%d", low_ppm, mid, high_ppm, status);
+                    ESP_LOGI(TAG, "  (0=GOOD/green, 1=MODERATE/yellow, 2=WARNING/orange, 3=ALERT/red)");
+                }
             } else {
                 status = sensor_data_get_co2_status(sensor->current.co2_ppm);
+                static uint32_t last_log_time2 = 0;
+                uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                if (now - last_log_time2 > 10000) {
+                    last_log_time2 = now;
+                    ESP_LOGW(TAG, "Sensor %d: thresholds NOT valid, using defaults (800/1400)", i);
+                }
             }
         }
         const char *status_text = sensor_data_get_status_text(status);

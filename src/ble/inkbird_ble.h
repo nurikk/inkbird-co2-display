@@ -109,6 +109,49 @@ typedef struct {
 } inkbird_co2_thresholds_t;
 
 /**
+ * @brief CO2 calibration settings (Command 0x02)
+ */
+typedef struct {
+    uint8_t  display_mode;     // Display mode (0-4)
+    bool     use_custom;       // Custom/plant mode enabled
+    bool     auto_calibration; // Auto calibration enabled
+    uint8_t  manual_mode;      // 0=off, 1=calibrating, 4=reset CO2
+    uint16_t manual_cal_value; // Manual calibration value (PPM)
+    bool     valid;            // Data has been synced
+} inkbird_co2_settings_t;
+
+/**
+ * @brief CO2 alarm settings (Command 0x04)
+ */
+typedef struct {
+    bool     enabled;          // Alarm enabled
+    uint8_t  alarm_mode;       // Alarm behavior mode
+    uint16_t alarm_value;      // CO2 alarm threshold (PPM)
+    bool     valid;            // Data has been synced
+} inkbird_alarm_settings_t;
+
+/**
+ * @brief Calibration offset settings (Command 0x05)
+ */
+typedef struct {
+    int16_t  co2_offset;       // CO2 offset in PPM (signed)
+    int16_t  temp_offset;      // Temperature offset * 10 (signed)
+    int16_t  hum_offset;       // Humidity offset * 10 (signed)
+    bool     use_fahrenheit;   // Temperature unit (false=Celsius, true=Fahrenheit)
+    bool     valid;            // Data has been synced
+} inkbird_calibration_t;
+
+/**
+ * @brief Combined device settings
+ */
+typedef struct {
+    inkbird_co2_settings_t   co2_settings;   // CO2 mode/calibration (0x02)
+    inkbird_co2_thresholds_t thresholds;     // CO2 thresholds (0x03)
+    inkbird_alarm_settings_t alarm;          // Alarm settings (0x04)
+    inkbird_calibration_t    calibration;    // Calibration offsets (0x05)
+} inkbird_device_settings_t;
+
+/**
  * @brief Initialize BLE subsystem for Inkbird sensors
  *
  * Initializes the NimBLE stack and prepares for scanning/connecting.
@@ -289,6 +332,98 @@ bool inkbird_ble_is_sensor_enabled(uint8_t index);
  * @return CO2 threshold structure (check valid flag)
  */
 inkbird_co2_thresholds_t inkbird_ble_get_thresholds(uint8_t index);
+
+/**
+ * @brief Get all device settings for a sensor
+ *
+ * @param index Sensor index (0 to INKBIRD_SENSOR_COUNT-1)
+ * @return Combined device settings structure
+ */
+inkbird_device_settings_t inkbird_ble_get_settings(uint8_t index);
+
+/**
+ * @brief Request settings sync from sensor
+ *
+ * Sends commands to query CO2 settings, thresholds, alarm, and calibration.
+ * Results will be available via inkbird_ble_get_settings() after responses arrive.
+ *
+ * @param sensor_idx Sensor index
+ * @param timeout_ms Timeout for connection and data
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms);
+
+/**
+ * @brief Set CO2 thresholds on device
+ *
+ * @param sensor_idx Sensor index
+ * @param normal_high Normal mode high threshold (PPM)
+ * @param normal_low Normal mode low threshold (PPM)
+ * @param plant_high Plant mode high threshold (PPM)
+ * @param plant_low Plant mode low threshold (PPM)
+ * @param reset_to_defaults If true, reset thresholds to factory defaults
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_set_thresholds(uint8_t sensor_idx,
+                                      uint16_t normal_high, uint16_t normal_low,
+                                      uint16_t plant_high, uint16_t plant_low,
+                                      bool reset_to_defaults);
+
+/**
+ * @brief Set CO2 alarm settings on device
+ *
+ * @param sensor_idx Sensor index
+ * @param enabled Alarm enabled
+ * @param alarm_mode Alarm behavior mode
+ * @param alarm_value CO2 threshold for alarm (PPM)
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_set_alarm(uint8_t sensor_idx,
+                                 bool enabled, uint8_t alarm_mode, uint16_t alarm_value);
+
+/**
+ * @brief Set calibration offsets on device
+ *
+ * @param sensor_idx Sensor index
+ * @param co2_offset CO2 offset in PPM (signed)
+ * @param temp_offset Temperature offset * 10 (signed)
+ * @param hum_offset Humidity offset * 10 (signed)
+ * @param use_fahrenheit Temperature unit
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_set_calibration(uint8_t sensor_idx,
+                                       int16_t co2_offset, int16_t temp_offset,
+                                       int16_t hum_offset, bool use_fahrenheit);
+
+/**
+ * @brief Set CO2 mode settings on device
+ *
+ * @param sensor_idx Sensor index
+ * @param display_mode Display mode (0-4)
+ * @param use_custom Use custom/plant mode
+ * @param auto_calibration Enable auto calibration
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_set_co2_mode(uint8_t sensor_idx,
+                                    uint8_t display_mode, bool use_custom,
+                                    bool auto_calibration);
+
+/**
+ * @brief Trigger manual CO2 calibration
+ *
+ * @param sensor_idx Sensor index
+ * @param cal_value Calibration reference value (PPM), typically 400-450 for outdoor air
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_calibrate_co2(uint8_t sensor_idx, uint16_t cal_value);
+
+/**
+ * @brief Reset CO2 sensor
+ *
+ * @param sensor_idx Sensor index
+ * @return ESP_OK on success
+ */
+esp_err_t inkbird_ble_reset_co2(uint8_t sensor_idx);
 
 #ifdef __cplusplus
 }

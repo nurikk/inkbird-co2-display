@@ -55,6 +55,8 @@ static const uint8_t CMD_REALTIME_DATA[] = {0x55, 0xAA, 0x09, 0x06, 0x01, 0x0F};
 static const uint8_t CMD_PAIRING[] = {0x55, 0xAA, 0x08, 0x06, 0x01, 0x0E};         // Pairing request
 static const uint8_t CMD_CO2_SETTINGS[]  = {0x55, 0xAA, 0x02, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C};  // Query CO2 settings
 static const uint8_t CMD_CO2_THRESHOLDS[] = {0x55, 0xAA, 0x03, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10}; // Query thresholds
+static const uint8_t CMD_CO2_ALARM[] = {0x55, 0xAA, 0x04, 0x09, 0x00, 0x00, 0x00, 0x00, 0x0D};  // Query alarm settings
+static const uint8_t CMD_CALIBRATION[] = {0x55, 0xAA, 0x05, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12};  // Query calibration
 static const uint8_t CMD_HISTORY_START[] = {0x55, 0xAA, 0x07, 0x06, 0x00, 0x0C};
 static const uint8_t CMD_HISTORY_STOP[]  = {0x55, 0xAA, 0x07, 0x06, 0x01, 0x0D};
 
@@ -77,6 +79,15 @@ static inkbird_reading_t s_readings[INKBIRD_SENSOR_COUNT];
 
 // CO2 thresholds synced from sensors
 static inkbird_co2_thresholds_t s_thresholds[INKBIRD_SENSOR_COUNT];
+
+// Additional settings synced from sensors
+static inkbird_co2_settings_t s_co2_settings[INKBIRD_SENSOR_COUNT];
+static inkbird_alarm_settings_t s_alarm_settings[INKBIRD_SENSOR_COUNT];
+static inkbird_calibration_t s_calibration[INKBIRD_SENSOR_COUNT];
+
+// Settings request mode flag
+static bool s_settings_request_mode = false;
+static uint8_t s_settings_responses_received = 0;
 
 // Failure tracking for each sensor
 static uint8_t s_failure_count[INKBIRD_SENSOR_COUNT];
@@ -468,10 +479,15 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         result = ESP_ERR_TIMEOUT;
     }
 
-    // Disconnect if still connected
+    // Disconnect/cancel any pending connection
     if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
         esp_ble_gattc_close(s_gattc_if, s_conn_id);
         vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for disconnect to complete
+    } else if (s_gattc_if != ESP_GATT_IF_NONE) {
+        // Cancel pending connection that never completed (fixes L2CAP state corruption)
+        ESP_LOGW(TAG, "Cancelling pending connection to clean up BLE state");
+        esp_ble_gap_disconnect(s_target_bda);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
     s_connected = false;  // Ensure state is reset
 
@@ -988,43 +1004,21 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
 
             // For history download mode, signal that setup is complete so we can
             // proceed to send the history command.
-            // For normal mode, send real-time data request command to get immediate reading.
+            // For normal mode, send pairing request first per protocol section 7.2
             if (s_history_state != INKBIRD_HISTORY_IDLE) {
                 ESP_LOGI(TAG, "History mode: signaling setup complete");
                 xSemaphoreGive(s_read_complete_sem);
             } else {
-                sensor_data_set_status(s_current_sensor_index, "Requesting...");
+                sensor_data_set_status(s_current_sensor_index, "Pairing...");
                 if (s_cmd_char_handle != 0) {
-                    // Send pairing request (0x08) to initiate communication
+                    // Step 1: Send pairing request (0x08) per protocol section 7.2
+                    // Device will respond with 00 (ready) or 02 (paired)
                     ESP_LOGI(TAG, "Sending pairing request...");
                     esp_ble_gattc_write_char(
                         gattc_if, s_conn_id, s_cmd_char_handle,
                         sizeof(CMD_PAIRING), (uint8_t *)CMD_PAIRING,
                         ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-                    // Send CO2 settings request (0x02) to get custom mode flag
-                    ESP_LOGI(TAG, "Sending CO2 settings request...");
-                    esp_ble_gattc_write_char(
-                        gattc_if, s_conn_id, s_cmd_char_handle,
-                        sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
-                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-                    // Send CO2 thresholds request (0x03)
-                    ESP_LOGI(TAG, "Sending CO2 thresholds request...");
-                    esp_ble_gattc_write_char(
-                        gattc_if, s_conn_id, s_cmd_char_handle,
-                        sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
-                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-                    // Send real-time data request (0x09) - completion signaled when this response arrives
-                    ESP_LOGI(TAG, "Sending real-time data request...");
-                    esp_err_t ret = esp_ble_gattc_write_char(
-                        gattc_if, s_conn_id, s_cmd_char_handle,
-                        sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
-                        ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
-                    if (ret != ESP_OK) {
-                        ESP_LOGW(TAG, "Failed to send data request: %s", esp_err_to_name(ret));
-                    }
+                    // Other commands will be sent after pairing response in NOTIFY handler
                 } else {
                     ESP_LOGW(TAG, "No command handle, waiting for passive notification...");
                 }
@@ -1117,13 +1111,40 @@ static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
     if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA) {
         uint8_t cmd_id = data[2];
 
-        // Parse pairing response (cmd 0x08)
+        // Parse pairing response (cmd 0x08) per protocol section 7.2
         // Response: 55 AA 08 06 XX - where XX: 00=ready, 02=success
         if (cmd_id == 0x08 && len >= 5) {
             uint8_t status = data[4];
             ESP_LOGI(TAG, "Pairing response: %s (0x%02X)",
                      status == 0x00 ? "ready" : status == 0x02 ? "success" : "unknown",
                      status);
+
+            // After pairing success (or ready), send settings/data requests
+            if ((status == 0x00 || status == 0x02) && s_cmd_char_handle != 0 &&
+                s_history_state == INKBIRD_HISTORY_IDLE && !s_settings_request_mode) {
+                sensor_data_set_status(sensor_idx, "Requesting...");
+
+                // Send CO2 settings request (0x02) to get custom mode flag
+                ESP_LOGI(TAG, "Sending CO2 settings request...");
+                esp_ble_gattc_write_char(
+                    s_gattc_if, s_conn_id, s_cmd_char_handle,
+                    sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
+                    ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+                // Send CO2 thresholds request (0x03)
+                ESP_LOGI(TAG, "Sending CO2 thresholds request...");
+                esp_ble_gattc_write_char(
+                    s_gattc_if, s_conn_id, s_cmd_char_handle,
+                    sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
+                    ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+                // Send real-time data request (0x09) - completion signaled when response arrives
+                ESP_LOGI(TAG, "Sending real-time data request...");
+                esp_ble_gattc_write_char(
+                    s_gattc_if, s_conn_id, s_cmd_char_handle,
+                    sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
+                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+            }
             return false;
         }
 
@@ -1131,14 +1152,30 @@ static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         // Response format: 55 AA 02 0B [mode] [custom] [auto] [manual] [cal_hi] [cal_lo] [checksum]
         // Byte 4: Display mode (0-4)
         // Byte 5: Custom mode flag (00=normal/default, 01=plant/custom)
-        if (cmd_id == 0x02 && len >= 6 && s_ble_mutex != NULL) {
-            bool use_custom = (data[5] != 0x00);
+        // Byte 6: Auto calibration flag
+        // Byte 7: Manual mode (0=off, 1=calibrating, 4=reset)
+        // Bytes 8-9: Manual calibration value
+        if (cmd_id == 0x02 && len >= 10 && s_ble_mutex != NULL) {
             xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
-            s_thresholds[sensor_idx].use_custom = use_custom;
+            s_co2_settings[sensor_idx].display_mode = data[4];
+            s_co2_settings[sensor_idx].use_custom = (data[5] != 0x00);
+            s_co2_settings[sensor_idx].auto_calibration = (data[6] != 0x00);
+            s_co2_settings[sensor_idx].manual_mode = data[7];
+            s_co2_settings[sensor_idx].manual_cal_value = ((uint16_t)data[8] << 8) | data[9];
+            s_co2_settings[sensor_idx].valid = true;
+            // Also update thresholds struct for backwards compatibility
+            s_thresholds[sensor_idx].use_custom = s_co2_settings[sensor_idx].use_custom;
             s_thresholds[sensor_idx].settings_valid = true;
             xSemaphoreGive(s_ble_mutex);
-            ESP_LOGI(TAG, "Sensor %d CO2 mode: %s", sensor_idx,
-                     use_custom ? "CUSTOM (plant mode)" : "DEFAULT (normal mode)");
+            ESP_LOGI(TAG, "Sensor %d CO2 settings: mode=%d, custom=%d, auto_cal=%d, manual=%d, cal_val=%u",
+                     sensor_idx, s_co2_settings[sensor_idx].display_mode,
+                     s_co2_settings[sensor_idx].use_custom,
+                     s_co2_settings[sensor_idx].auto_calibration,
+                     s_co2_settings[sensor_idx].manual_mode,
+                     s_co2_settings[sensor_idx].manual_cal_value);
+            if (s_settings_request_mode) {
+                s_settings_responses_received++;
+            }
             return false;
         }
 
@@ -1162,6 +1199,58 @@ static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
             xSemaphoreGive(s_ble_mutex);
             ESP_LOGI(TAG, "Sensor %d thresholds synced: normal=%u-%u, plant=%u-%u ppm",
                      sensor_idx, norm_low, norm_high, plant_low, plant_high);
+            if (s_settings_request_mode) {
+                s_settings_responses_received++;
+            }
+            return false;
+        }
+
+        // Parse CO2 alarm settings (cmd 0x04)
+        // Response format: 55 AA 04 09 [enabled] [mode] [value_hi] [value_lo] [checksum]
+        if (cmd_id == 0x04 && len >= 8 && s_ble_mutex != NULL) {
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            s_alarm_settings[sensor_idx].enabled = (data[4] == 0x01);
+            s_alarm_settings[sensor_idx].alarm_mode = data[5];
+            s_alarm_settings[sensor_idx].alarm_value = ((uint16_t)data[6] << 8) | data[7];
+            s_alarm_settings[sensor_idx].valid = true;
+            xSemaphoreGive(s_ble_mutex);
+            ESP_LOGI(TAG, "Sensor %d alarm: enabled=%d, mode=%d, value=%u ppm",
+                     sensor_idx, s_alarm_settings[sensor_idx].enabled,
+                     s_alarm_settings[sensor_idx].alarm_mode,
+                     s_alarm_settings[sensor_idx].alarm_value);
+            if (s_settings_request_mode) {
+                s_settings_responses_received++;
+            }
+            return false;
+        }
+
+        // Parse calibration settings (cmd 0x05)
+        // Response format: 55 AA 05 0C [co2_sign] [co2_val] [temp_sign] [temp_val] [hum_sign] [hum_val] [unit] [checksum]
+        if (cmd_id == 0x05 && len >= 11 && s_ble_mutex != NULL) {
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            bool co2_neg = (data[4] != 0x00);
+            uint8_t co2_val = data[5];
+            s_calibration[sensor_idx].co2_offset = co2_neg ? -(int16_t)co2_val : (int16_t)co2_val;
+
+            bool temp_neg = (data[6] != 0x00);
+            uint8_t temp_val = data[7];
+            s_calibration[sensor_idx].temp_offset = temp_neg ? -(int16_t)temp_val : (int16_t)temp_val;
+
+            bool hum_neg = (data[8] != 0x00);
+            uint8_t hum_val = data[9];
+            s_calibration[sensor_idx].hum_offset = hum_neg ? -(int16_t)hum_val : (int16_t)hum_val;
+
+            s_calibration[sensor_idx].use_fahrenheit = (data[10] != 0x00);
+            s_calibration[sensor_idx].valid = true;
+            xSemaphoreGive(s_ble_mutex);
+            ESP_LOGI(TAG, "Sensor %d calibration: CO2=%d, Temp=%d, Hum=%d, Unit=%s",
+                     sensor_idx, s_calibration[sensor_idx].co2_offset,
+                     s_calibration[sensor_idx].temp_offset,
+                     s_calibration[sensor_idx].hum_offset,
+                     s_calibration[sensor_idx].use_fahrenheit ? "F" : "C");
+            if (s_settings_request_mode) {
+                s_settings_responses_received++;
+            }
             return false;
         }
 
@@ -1299,11 +1388,16 @@ static void read_task(void *arg)
                 }
             }
 
-            // Disconnect if still connected
+            // Disconnect/cancel any pending connection
             if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
                 esp_ble_gattc_close(s_gattc_if, s_conn_id);
                 vTaskDelay(pdMS_TO_TICKS(500));
+            } else if (s_gattc_if != ESP_GATT_IF_NONE) {
+                // Cancel pending connection that never completed
+                esp_ble_gap_disconnect(s_target_bda);
+                vTaskDelay(pdMS_TO_TICKS(300));
             }
+            s_connected = false;
 
             // Delay between sensors
             vTaskDelay(pdMS_TO_TICKS(INKBIRD_INTER_SENSOR_DELAY_MS));
@@ -1643,6 +1737,10 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         s_history_state = INKBIRD_HISTORY_ERROR;
         if (s_connected) {
             esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        } else {
+            // Cancel pending connection that never completed
+            esp_ble_gap_disconnect(s_target_bda);
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
         return ESP_ERR_TIMEOUT;
     }
@@ -1771,4 +1869,325 @@ void inkbird_ble_get_history_progress(uint16_t *out_expected, uint16_t *out_rece
     if (out_received != NULL) {
         *out_received = s_history_received_count;
     }
+}
+
+// ============================================================================
+// Settings Public API
+// ============================================================================
+
+/**
+ * @brief Calculate checksum for command packet
+ */
+static uint8_t calc_checksum(const uint8_t *data, size_t len)
+{
+    uint16_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    return (uint8_t)(sum & 0xFF);
+}
+
+inkbird_device_settings_t inkbird_ble_get_settings(uint8_t index)
+{
+    inkbird_device_settings_t settings = {0};
+    if (index >= INKBIRD_SENSOR_COUNT) {
+        return settings;
+    }
+
+    if (s_ble_mutex != NULL) {
+        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+        settings.co2_settings = s_co2_settings[index];
+        settings.thresholds = s_thresholds[index];
+        settings.alarm = s_alarm_settings[index];
+        settings.calibration = s_calibration[index];
+        xSemaphoreGive(s_ble_mutex);
+    }
+    return settings;
+}
+
+esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
+{
+    if (!s_ble_initialized) {
+        ESP_LOGE(TAG, "BLE not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (sensor_idx >= s_active_sensor_count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Requesting settings from sensor %d...", sensor_idx);
+
+    // Close any existing connection first
+    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // Drain stale semaphore signals
+    while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
+
+    // Set up for settings request
+    s_current_sensor_index = sensor_idx;
+    s_settings_request_mode = true;
+    s_settings_responses_received = 0;
+    s_data_received = false;
+    s_connected = false;
+    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+
+    // Connect
+    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_PUBLIC, true);
+    if (ret != ESP_OK) {
+        ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_RANDOM, true);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to connect: %s", esp_err_to_name(ret));
+        s_settings_request_mode = false;
+        return ret;
+    }
+
+    // Wait for connection and CCCD setup
+    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms / 2));
+    if (got_sem != pdTRUE || !s_connected) {
+        ESP_LOGE(TAG, "Connection timeout");
+        s_settings_request_mode = false;
+        if (s_connected) {
+            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        } else {
+            esp_ble_gap_disconnect(s_target_bda);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Small delay after notification setup
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // Send all settings query commands
+    if (s_cmd_char_handle != 0) {
+        ESP_LOGI(TAG, "Sending settings query commands...");
+
+        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+            sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
+            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+            sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
+            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+            sizeof(CMD_CO2_ALARM), (uint8_t *)CMD_CO2_ALARM,
+            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+            sizeof(CMD_CALIBRATION), (uint8_t *)CMD_CALIBRATION,
+            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+    }
+
+    // Wait for responses
+    vTaskDelay(pdMS_TO_TICKS(timeout_ms / 2));
+
+    ESP_LOGI(TAG, "Settings responses received: %d/4", s_settings_responses_received);
+
+    // Disconnect
+    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    s_settings_request_mode = false;
+    s_connected = false;
+
+    return (s_settings_responses_received > 0) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+/**
+ * @brief Helper to send a command and wait for acknowledgment
+ */
+static esp_err_t send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, size_t len, uint32_t timeout_ms)
+{
+    if (!s_ble_initialized || sensor_idx >= s_active_sensor_count) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Close any existing connection
+    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
+
+    s_current_sensor_index = sensor_idx;
+    s_data_received = false;
+    s_connected = false;
+    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+
+    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_PUBLIC, true);
+    if (ret != ESP_OK) {
+        ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_RANDOM, true);
+    }
+
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Wait for connection
+    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms));
+    if (got_sem != pdTRUE || !s_connected || s_cmd_char_handle == 0) {
+        if (s_connected) {
+            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        } else {
+            esp_ble_gap_disconnect(s_target_bda);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // Send command
+    ESP_LOGI(TAG, "Sending settings command:");
+    ESP_LOG_BUFFER_HEX(TAG, cmd, len);
+
+    ret = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+        len, (uint8_t *)cmd, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Disconnect
+    if (s_connected) {
+        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    return ret;
+}
+
+esp_err_t inkbird_ble_set_thresholds(uint8_t sensor_idx,
+                                      uint16_t normal_high, uint16_t normal_low,
+                                      uint16_t plant_high, uint16_t plant_low,
+                                      bool reset_to_defaults)
+{
+    // Command 0x03: 55 AA 03 0E [norm_high] [norm_low] [plant_high] [plant_low] [reset] [checksum]
+    uint8_t cmd[14];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x03;  // Command ID
+    cmd[3] = 0x0E;  // Length
+    cmd[4] = (normal_high >> 8) & 0xFF;
+    cmd[5] = normal_high & 0xFF;
+    cmd[6] = (normal_low >> 8) & 0xFF;
+    cmd[7] = normal_low & 0xFF;
+    cmd[8] = (plant_high >> 8) & 0xFF;
+    cmd[9] = plant_high & 0xFF;
+    cmd[10] = (plant_low >> 8) & 0xFF;
+    cmd[11] = plant_low & 0xFF;
+    cmd[12] = reset_to_defaults ? 0x01 : 0x00;
+    cmd[13] = calc_checksum(cmd, 13);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
+}
+
+esp_err_t inkbird_ble_set_alarm(uint8_t sensor_idx,
+                                 bool enabled, uint8_t alarm_mode, uint16_t alarm_value)
+{
+    // Command 0x04: 55 AA 04 09 [enabled] [mode] [value_hi] [value_lo] [checksum]
+    uint8_t cmd[9];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x04;  // Command ID
+    cmd[3] = 0x09;  // Length
+    cmd[4] = enabled ? 0x01 : 0x00;
+    cmd[5] = alarm_mode;
+    cmd[6] = (alarm_value >> 8) & 0xFF;
+    cmd[7] = alarm_value & 0xFF;
+    cmd[8] = calc_checksum(cmd, 8);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
+}
+
+esp_err_t inkbird_ble_set_calibration(uint8_t sensor_idx,
+                                       int16_t co2_offset, int16_t temp_offset,
+                                       int16_t hum_offset, bool use_fahrenheit)
+{
+    // Command 0x05: 55 AA 05 0C [co2_sign] [co2_val] [temp_sign] [temp_val] [hum_sign] [hum_val] [unit] [checksum]
+    uint8_t cmd[12];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x05;  // Command ID
+    cmd[3] = 0x0C;  // Length
+    cmd[4] = (co2_offset < 0) ? 0x01 : 0x00;
+    cmd[5] = (uint8_t)(co2_offset < 0 ? -co2_offset : co2_offset);
+    cmd[6] = (temp_offset < 0) ? 0x01 : 0x00;
+    cmd[7] = (uint8_t)(temp_offset < 0 ? -temp_offset : temp_offset);
+    cmd[8] = (hum_offset < 0) ? 0x01 : 0x00;
+    cmd[9] = (uint8_t)(hum_offset < 0 ? -hum_offset : hum_offset);
+    cmd[10] = use_fahrenheit ? 0x01 : 0x00;
+    cmd[11] = calc_checksum(cmd, 11);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
+}
+
+esp_err_t inkbird_ble_set_co2_mode(uint8_t sensor_idx,
+                                    uint8_t display_mode, bool use_custom,
+                                    bool auto_calibration)
+{
+    // Command 0x02: 55 AA 02 0B [mode] [custom] [auto] [manual=0] [cal_hi=0] [cal_lo=0] [checksum]
+    uint8_t cmd[11];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x02;  // Command ID
+    cmd[3] = 0x0B;  // Length
+    cmd[4] = display_mode;
+    cmd[5] = use_custom ? 0x01 : 0x00;
+    cmd[6] = auto_calibration ? 0x01 : 0x00;
+    cmd[7] = 0x00;  // Manual mode = off
+    cmd[8] = 0x00;  // Cal value high
+    cmd[9] = 0x00;  // Cal value low
+    cmd[10] = calc_checksum(cmd, 10);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
+}
+
+esp_err_t inkbird_ble_calibrate_co2(uint8_t sensor_idx, uint16_t cal_value)
+{
+    // Command 0x02 with manual_mode=1: Start calibration
+    uint8_t cmd[11];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x02;
+    cmd[3] = 0x0B;
+    cmd[4] = 0x00;  // Display mode (preserve current)
+    cmd[5] = 0x00;  // Custom mode
+    cmd[6] = 0x00;  // Auto calibration
+    cmd[7] = 0x01;  // Manual mode = calibrating
+    cmd[8] = (cal_value >> 8) & 0xFF;
+    cmd[9] = cal_value & 0xFF;
+    cmd[10] = calc_checksum(cmd, 10);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
+}
+
+esp_err_t inkbird_ble_reset_co2(uint8_t sensor_idx)
+{
+    // Command 0x02 with manual_mode=4: Reset CO2 sensor
+    uint8_t cmd[11];
+    cmd[0] = 0x55;
+    cmd[1] = 0xAA;
+    cmd[2] = 0x02;
+    cmd[3] = 0x0B;
+    cmd[4] = 0x00;
+    cmd[5] = 0x00;
+    cmd[6] = 0x00;
+    cmd[7] = 0x04;  // Manual mode = reset
+    cmd[8] = 0x00;
+    cmd[9] = 0x00;
+    cmd[10] = calc_checksum(cmd, 10);
+
+    return send_settings_command(sensor_idx, cmd, sizeof(cmd), 10000);
 }
