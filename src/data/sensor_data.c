@@ -220,6 +220,65 @@ const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
     return s_time_offsets_buffer;
 }
 
+static int16_t s_filtered_co2_buffer[SENSOR_HISTORY_SIZE];
+
+const int16_t *sensor_data_get_co2_history_filtered(uint8_t index, uint16_t max_minutes, uint8_t *out_count)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    sensor_data_t *sensor = &s_sensors[index];
+
+    if (sensor->history_count == 0) {
+        if (out_count) *out_count = 0;
+        return s_filtered_co2_buffer;
+    }
+
+    uint8_t start;
+    if (sensor->history_count < SENSOR_HISTORY_SIZE) {
+        start = 0;
+    } else {
+        start = sensor->history_head;
+    }
+
+    uint16_t total = sensor->total_minutes;
+    uint8_t filtered_count = 0;
+    uint8_t first_valid_idx = 0;
+    bool found_start = false;
+
+    for (uint8_t i = 0; i < sensor->history_count; i++) {
+        uint8_t src_idx = (start + i) % SENSOR_HISTORY_SIZE;
+        uint16_t minutes_ago = total - sensor->time_offsets[src_idx];
+
+        if (minutes_ago <= max_minutes) {
+            if (!found_start) {
+                first_valid_idx = i;
+                found_start = true;
+            }
+            filtered_count++;
+        }
+    }
+
+    if (filtered_count == 0) {
+        if (out_count) *out_count = 0;
+        return s_filtered_co2_buffer;
+    }
+
+    for (uint8_t i = 0; i < filtered_count; i++) {
+        uint8_t src_idx = (start + first_valid_idx + i) % SENSOR_HISTORY_SIZE;
+        s_filtered_co2_buffer[i] = sensor->co2_history[src_idx];
+    }
+
+    for (uint8_t i = filtered_count; i < SENSOR_HISTORY_SIZE; i++) {
+        s_filtered_co2_buffer[i] = s_filtered_co2_buffer[filtered_count - 1];
+    }
+
+    if (out_count) *out_count = filtered_count;
+    return s_filtered_co2_buffer;
+}
+
 co2_status_t sensor_data_get_co2_status(uint16_t co2_ppm)
 {
     return sensor_data_get_co2_status_ex(co2_ppm, CO2_LEVEL_GOOD_DEFAULT, CO2_LEVEL_WARNING_DEFAULT);

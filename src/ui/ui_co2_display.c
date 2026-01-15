@@ -1035,7 +1035,7 @@ void ui_co2_display_update(void)
         }
 
         uint8_t history_count = 0;
-        const int16_t *history = sensor_data_get_co2_history(i, &history_count);
+        const int16_t *history = sensor_data_get_co2_history_filtered(i, 60, &history_count);
         if (history_count > 1 && history != NULL) {
             for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
                 s_chart_data[i][j] = history[j];

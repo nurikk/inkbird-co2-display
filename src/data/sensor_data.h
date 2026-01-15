@@ -164,6 +164,19 @@ uint16_t sensor_data_get_total_minutes(uint8_t index);
 const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count);
 
 /**
+ * @brief Get CO2 history filtered to last N minutes
+ *
+ * Returns CO2 history values that fall within the specified time window.
+ * Useful for displaying "last hour" charts on main screen widgets.
+ *
+ * @param index Sensor index (0-3)
+ * @param max_minutes Maximum age in minutes (e.g., 60 for last hour)
+ * @param out_count Output: number of valid entries in returned array
+ * @return Pointer to filtered history array (internal buffer, do not free)
+ */
+const int16_t *sensor_data_get_co2_history_filtered(uint8_t index, uint16_t max_minutes, uint8_t *out_count);
+
+/**
  * @brief Get CO2 status level using default thresholds
  *
  * @param co2_ppm CO2 concentration in ppm
