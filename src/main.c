@@ -35,6 +35,19 @@ static const char *TAG = "main";
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
 #define DISPLAY_REFRESH_MS      60000   // TFT refresh interval (1 minute)
+#define PROGRESS_UPDATE_MS      200     // Progress bar update interval during sync
+#define SENSOR_READ_RETRY_DELAY_MS 2000 // Delay between sensor read retries
+
+// Display task configuration
+#define DISPLAY_TASK_STACK_SIZE 8192
+#define DISPLAY_TASK_PRIORITY   5
+#define UPDATE_INTERVAL_FAST_US 100000  // 100ms when downloading
+#define UPDATE_INTERVAL_NORMAL_US 500000 // 500ms normal operation
+#define TOUCH_STATUS_LOG_INTERVAL_US 60000000 // 60s between touch status logs
+
+// LED CO2 thresholds
+#define LED_CO2_RED_THRESHOLD   1400    // CO2 ppm threshold for red LED
+#define LED_CO2_YELLOW_THRESHOLD 800    // CO2 ppm threshold for yellow LED
 
 // History download configuration
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
@@ -88,9 +101,9 @@ static void led_update_from_co2(void)
     }
 
     uint16_t co2 = sensor->current.co2_ppm;
-    if (co2 >= 1400) {
+    if (co2 >= LED_CO2_RED_THRESHOLD) {
         led_set_color(true, false, false);
-    } else if (co2 >= 800) {
+    } else if (co2 >= LED_CO2_YELLOW_THRESHOLD) {
         led_set_color(true, true, false);
     } else {
         led_set_color(false, true, false);
@@ -117,7 +130,7 @@ static void download_sensor_history(uint8_t sensor_idx)
     if (s_progress_timer == NULL) {
         s_progress_timer = xTimerCreate(
             "progress",
-            pdMS_TO_TICKS(200),
+            pdMS_TO_TICKS(PROGRESS_UPDATE_MS),
             pdTRUE,
             NULL,
             progress_update_cb
@@ -280,7 +293,7 @@ static bool read_initial_sensor_value(int sensor_idx)
                  sensor_idx, attempt, esp_err_to_name(ret));
 
         if (attempt < INKBIRD_STARTUP_READ_RETRIES) {
-            vTaskDelay(pdMS_TO_TICKS(2000));  // Wait before retry
+            vTaskDelay(pdMS_TO_TICKS(SENSOR_READ_RETRY_DELAY_MS));
         }
     }
 
@@ -319,7 +332,7 @@ static void display_task(void *arg)
 
     while (1) {
         int64_t now_check = esp_timer_get_time();
-        if (now_check - last_touch_status_us >= 60000000) {
+        if (now_check - last_touch_status_us >= TOUCH_STATUS_LOG_INTERVAL_US) {
             ESP_LOGI(TAG, "Touch type: %d (0=none, 1=gt911, 2=xpt2046)",
                      ui_co2_display_get_touch_type());
             last_touch_status_us = now_check;
@@ -328,7 +341,7 @@ static void display_task(void *arg)
 
         int64_t now_us = esp_timer_get_time();
         bool downloading = any_sensor_downloading();
-        int64_t update_interval = downloading ? 100000 : 500000;
+        int64_t update_interval = downloading ? UPDATE_INTERVAL_FAST_US : UPDATE_INTERVAL_NORMAL_US;
 
         if (s_do_refresh || (now_us - last_update_us) >= update_interval) {
             s_do_refresh = false;
@@ -398,9 +411,9 @@ void app_main(void)
     xTaskCreate(
         display_task,
         "display",
-        8192,
+        DISPLAY_TASK_STACK_SIZE,
         NULL,
-        5,
+        DISPLAY_TASK_PRIORITY,
         NULL
     );
 

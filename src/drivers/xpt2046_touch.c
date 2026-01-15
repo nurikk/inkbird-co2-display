@@ -25,8 +25,14 @@ static const char *TAG = "xpt2046";
 #define CAL_Y_MAX           3800
 
 #define MIN_PRESSURE        50
+#define MAX_PRESSURE        4000
 
 #define TOUCH_SPI_HOST      SPI2_HOST
+#define XPT_SPI_CLOCK_HZ    2500000
+#define XPT_SPI_BITS        24
+#define XPT_ADC_SHIFT       3
+#define XPT_ADC_MASK        0x0FFF
+#define TOUCH_SAMPLES       4
 
 static bool s_initialized = false;
 static spi_device_handle_t s_touch_spi = NULL;
@@ -37,7 +43,7 @@ static uint16_t xpt2046_read_adc(uint8_t cmd)
     uint8_t rx_data[3] = { 0 };
 
     spi_transaction_t trans = {
-        .length = 24,
+        .length = XPT_SPI_BITS,
         .tx_buffer = tx_data,
         .rx_buffer = rx_data,
     };
@@ -48,8 +54,8 @@ static uint16_t xpt2046_read_adc(uint8_t cmd)
         return 0;
     }
 
-    uint16_t value = ((rx_data[1] << 8) | rx_data[2]) >> 3;
-    return value & 0x0FFF;
+    uint16_t value = ((rx_data[1] << 8) | rx_data[2]) >> XPT_ADC_SHIFT;
+    return value & XPT_ADC_MASK;
 }
 
 esp_err_t xpt2046_init(void)
@@ -68,7 +74,7 @@ esp_err_t xpt2046_init(void)
     gpio_config(&irq_conf);
 
     spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 2500000,
+        .clock_speed_hz = XPT_SPI_CLOCK_HZ,
         .mode = 0,
         .spics_io_num = XPT2046_PIN_CS,
         .queue_size = 1,
@@ -104,21 +110,20 @@ bool xpt2046_read(xpt2046_touch_data_t *data)
     uint16_t z1 = xpt2046_read_adc(XPT2046_CMD_Z1);
     uint16_t z2 = xpt2046_read_adc(XPT2046_CMD_Z2);
 
-    if (z1 < MIN_PRESSURE || z2 > 4000) {
+    if (z1 < MIN_PRESSURE || z2 > MAX_PRESSURE) {
         return false;
     }
 
     uint32_t raw_x = 0;
     uint32_t raw_y = 0;
-    const int samples = 4;
 
-    for (int i = 0; i < samples; i++) {
+    for (int i = 0; i < TOUCH_SAMPLES; i++) {
         raw_x += xpt2046_read_adc(XPT2046_CMD_X);
         raw_y += xpt2046_read_adc(XPT2046_CMD_Y);
     }
 
-    raw_x /= samples;
-    raw_y /= samples;
+    raw_x /= TOUCH_SAMPLES;
+    raw_y /= TOUCH_SAMPLES;
 
     if (raw_x < CAL_X_MIN || raw_x > CAL_X_MAX || raw_y < CAL_Y_MIN || raw_y > CAL_Y_MAX) {
         return false;
