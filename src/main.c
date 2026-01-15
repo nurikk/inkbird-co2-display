@@ -64,6 +64,9 @@ static volatile bool s_do_refresh = false;
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
 
+// History download task handle
+static TaskHandle_t s_history_task = NULL;
+
 static void progress_update_cb(TimerHandle_t timer)
 {
     (void)timer;
@@ -195,6 +198,46 @@ static void download_sensor_history(uint8_t sensor_idx)
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
+}
+
+/**
+ * @brief Background task to download history from all sensors
+ *
+ * After history download completes, starts periodic BLE reading.
+ */
+static void history_download_task(void *arg)
+{
+    (void)arg;
+
+    uint8_t active_count = inkbird_ble_get_active_count();
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Background: Syncing Historical Data");
+    ESP_LOGI(TAG, "========================================");
+
+    for (int i = 0; i < active_count; i++) {
+        sensor_data_t *sensor = sensor_data_get(i);
+        if (sensor) {
+            sensor->downloading = true;
+        }
+        s_do_refresh = true;
+
+        download_sensor_history(i);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  History sync complete!");
+    ESP_LOGI(TAG, "========================================");
+    s_do_refresh = true;
+
+    ESP_LOGI(TAG, "Starting periodic BLE reading...");
+    inkbird_ble_start();
+
+    s_history_task = NULL;
+    vTaskDelete(NULL);
 }
 
 /**
@@ -441,76 +484,56 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    // ========== PHASE 2: Render display with current values ==========
+    // ========== PHASE 2: Set up display timers ==========
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 2: Displaying Current Values");
+    ESP_LOGI(TAG, "  Phase 2: Setting Up Display Timers");
     ESP_LOGI(TAG, "========================================");
     s_do_refresh = true;
 
-#if DOWNLOAD_HISTORY_ON_STARTUP
-    // ========== PHASE 3: Download historical data ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 3: Syncing Historical Data");
-    ESP_LOGI(TAG, "========================================");
-
-    // Wait for any pending BLE operations to complete before starting history download
-    // This ensures the connection from Phase 1 is fully closed
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    // Mark sensors as downloading (for internal state tracking)
-    for (int i = 0; i < active_count; i++) {
-        sensor_data_t *sensor = sensor_data_get(i);
-        if (sensor) {
-            sensor->downloading = true;
-        }
-    }
-
-    // Force display update to show "Syncing..." before starting download
-    s_do_refresh = true;
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    // Download history from each sensor
-    for (int i = 0; i < active_count; i++) {
-        download_sensor_history(i);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-
-    // Final display refresh with history charts
-    ESP_LOGI(TAG, "Refreshing display with history charts...");
-    s_do_refresh = true;
-#endif
-
-    // ========== PHASE 4: Start periodic BLE reading ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 4: Starting Periodic Updates");
-    ESP_LOGI(TAG, "========================================");
-    inkbird_ble_start();
-
-    // Create sensor update timer
     s_sensor_timer = xTimerCreate(
         "sensor_update",
         pdMS_TO_TICKS(SENSOR_UPDATE_MS),
-        pdTRUE,  // Auto-reload
+        pdTRUE,
         NULL,
         sensor_update_cb
     );
     xTimerStart(s_sensor_timer, 0);
 
-    // Create display refresh timer
     s_refresh_timer = xTimerCreate(
         "display_refresh",
         pdMS_TO_TICKS(DISPLAY_REFRESH_MS),
-        pdTRUE,  // Auto-reload
+        pdTRUE,
         NULL,
         display_refresh_cb
     );
     xTimerStart(s_refresh_timer, 0);
 
-    ESP_LOGI(TAG, "Initialization complete!");
     ESP_LOGI(TAG, "Display will refresh every %d seconds", DISPLAY_REFRESH_MS / 1000);
+
+#if DOWNLOAD_HISTORY_ON_STARTUP
+    // ========== PHASE 3: Download historical data (then start periodic BLE) ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 3: Starting History Sync");
+    ESP_LOGI(TAG, "========================================");
+
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    xTaskCreate(
+        history_download_task,
+        "history_dl",
+        8192,
+        NULL,
+        4,
+        &s_history_task
+    );
+#else
+    ESP_LOGI(TAG, "Starting periodic BLE reading...");
+    inkbird_ble_start();
+#endif
+
+    ESP_LOGI(TAG, "Initialization complete!");
 
     // Main task can sleep
     while (1) {
