@@ -59,8 +59,10 @@ typedef struct {
     int16_t temp_history[SENSOR_HISTORY_SIZE];  // Temperature history (0.1°C units)
     int16_t hum_history[SENSOR_HISTORY_SIZE];   // Humidity history (0.1% units)
     int16_t pres_history[SENSOR_HISTORY_SIZE];  // Pressure history (hPa)
+    uint16_t time_offsets[SENSOR_HISTORY_SIZE]; // Minutes ago from now (reconstructed timestamps)
     uint8_t history_head;                       // Ring buffer head index
     uint8_t history_count;                      // Number of valid history entries
+    uint16_t total_minutes;                     // Total time span of history in minutes
     bool connected;                             // Sensor connection status
     bool downloading;                           // True while downloading history
     uint16_t download_expected;                 // Expected record count for download
@@ -116,6 +118,50 @@ void sensor_data_add_history(uint8_t index, uint16_t co2_ppm);
  */
 void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
                                    int16_t temperature, uint16_t humidity, uint16_t pressure);
+
+/**
+ * @brief Clear history for a sensor before bulk loading
+ *
+ * @param index Sensor index (0-3)
+ */
+void sensor_data_clear_history(uint8_t index);
+
+/**
+ * @brief Add full reading to history with interval for timestamp reconstruction
+ *
+ * Uses the INKBIRD timestamp reconstruction algorithm to calculate actual
+ * elapsed minutes between records based on the interval_mins field.
+ *
+ * @param index Sensor index (0-3)
+ * @param co2_ppm CO2 value in ppm
+ * @param temperature Temperature in 0.1°C units
+ * @param humidity Humidity in 0.1% units
+ * @param pressure Pressure in hPa
+ * @param interval_mins Minutes-of-hour when recorded (0-59)
+ */
+void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
+                                            int16_t temperature, uint16_t humidity,
+                                            uint16_t pressure, uint8_t interval_mins);
+
+/**
+ * @brief Get the total time span of history in minutes
+ *
+ * @param index Sensor index (0-3)
+ * @return Total minutes from oldest to newest record, 0 if no history
+ */
+uint16_t sensor_data_get_total_minutes(uint8_t index);
+
+/**
+ * @brief Get the time offsets array for charting
+ *
+ * Returns array of minutes-ago values corresponding to each history point.
+ * Index 0 is oldest (most minutes ago), index N-1 is newest (0 = now).
+ *
+ * @param index Sensor index (0-3)
+ * @param out_count Output: number of valid entries
+ * @return Pointer to time offsets array (internal buffer, do not free)
+ */
+const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count);
 
 /**
  * @brief Get CO2 status level using default thresholds

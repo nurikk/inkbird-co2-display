@@ -146,28 +146,33 @@ static void download_sensor_history(uint8_t sensor_idx)
         ESP_LOGI(TAG, "");
         ESP_LOGI(TAG, ">>> History download SUCCESS: %u records <<<", count);
 
-        // Feed history data into sensor_data module for chart display
-        ESP_LOGI(TAG, "Adding %u records to chart", count);
+        sensor_data_clear_history(sensor_idx);
 
-        // Log first and last records
-        ESP_LOGI(TAG, "  First: CO2=%u ppm, T=%.1f C",
+        ESP_LOGI(TAG, "Adding %u records to chart with timestamp reconstruction", count);
+
+        ESP_LOGI(TAG, "  First: CO2=%u ppm, T=%.1f C, interval=%u",
                  s_history_records[0].co2_ppm,
-                 s_history_records[0].temperature / 10.0f);
+                 s_history_records[0].temperature / 10.0f,
+                 s_history_records[0].interval_mins);
         if (count > 1) {
-            ESP_LOGI(TAG, "  Last:  CO2=%u ppm, T=%.1f C",
+            ESP_LOGI(TAG, "  Last:  CO2=%u ppm, T=%.1f C, interval=%u",
                      s_history_records[count - 1].co2_ppm,
-                     s_history_records[count - 1].temperature / 10.0f);
+                     s_history_records[count - 1].temperature / 10.0f,
+                     s_history_records[count - 1].interval_mins);
         }
 
         for (int i = 0; i < count; i++) {
             inkbird_history_record_t *hist = &s_history_records[i];
             if (hist->co2_ppm > 0 && hist->co2_ppm < 10000) {
-                sensor_data_add_history_full(sensor_idx, hist->co2_ppm,
-                                              hist->temperature, hist->humidity, hist->pressure);
+                sensor_data_add_history_with_interval(sensor_idx, hist->co2_ppm,
+                                                       hist->temperature, hist->humidity,
+                                                       hist->pressure, hist->interval_mins);
             }
         }
 
-        // Mark sensor as connected since we got data
+        uint16_t total_mins = sensor_data_get_total_minutes(sensor_idx);
+        ESP_LOGI(TAG, "  Total time span: %u minutes", total_mins);
+
         if (sensor) {
             sensor->connected = true;
         }

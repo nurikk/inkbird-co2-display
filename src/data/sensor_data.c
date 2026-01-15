@@ -15,6 +15,11 @@ static int16_t s_co2_history_buffer[SENSOR_HISTORY_SIZE];
 static int16_t s_temp_history_buffer[SENSOR_HISTORY_SIZE];
 static int16_t s_hum_history_buffer[SENSOR_HISTORY_SIZE];
 static int16_t s_pres_history_buffer[SENSOR_HISTORY_SIZE];
+static uint16_t s_time_offsets_buffer[SENSOR_HISTORY_SIZE];
+
+// Last interval for timestamp reconstruction
+static uint8_t s_last_interval[SENSOR_COUNT];
+static uint16_t s_cumulative_minutes[SENSOR_COUNT];
 
 void sensor_data_init(void)
 {
@@ -25,13 +30,18 @@ void sensor_data_init(void)
         s_sensors[i].connected = false;
         s_sensors[i].history_head = 0;
         s_sensors[i].history_count = 0;
+        s_sensors[i].total_minutes = 0;
 
         for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
             s_sensors[i].co2_history[j] = -1;
             s_sensors[i].temp_history[j] = -1;
             s_sensors[i].hum_history[j] = -1;
             s_sensors[i].pres_history[j] = -1;
+            s_sensors[i].time_offsets[j] = 0;
         }
+
+        s_last_interval[i] = 0;
+        s_cumulative_minutes[i] = 0;
     }
 }
 
@@ -54,15 +64,22 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
     sensor->current = *reading;
     sensor->connected = true;
 
+    if (sensor->history_count > 0) {
+        s_cumulative_minutes[index] += 1;
+    }
+
     sensor->co2_history[sensor->history_head] = (int16_t)reading->co2_ppm;
     sensor->temp_history[sensor->history_head] = reading->temperature;
     sensor->hum_history[sensor->history_head] = (int16_t)reading->humidity;
     sensor->pres_history[sensor->history_head] = (int16_t)reading->pressure;
+    sensor->time_offsets[sensor->history_head] = s_cumulative_minutes[index];
     sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
 
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         sensor->history_count++;
     }
+
+    sensor->total_minutes = s_cumulative_minutes[index];
 }
 
 void sensor_data_add_history(uint8_t index, uint16_t co2_ppm)
@@ -83,11 +100,124 @@ void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
     sensor->temp_history[sensor->history_head] = temperature;
     sensor->hum_history[sensor->history_head] = (int16_t)humidity;
     sensor->pres_history[sensor->history_head] = (int16_t)pressure;
+    sensor->time_offsets[sensor->history_head] = 0;
     sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
 
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         sensor->history_count++;
     }
+}
+
+void sensor_data_clear_history(uint8_t index)
+{
+    if (index >= SENSOR_COUNT) {
+        return;
+    }
+
+    sensor_data_t *sensor = &s_sensors[index];
+    sensor->history_head = 0;
+    sensor->history_count = 0;
+    sensor->total_minutes = 0;
+
+    for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+        sensor->co2_history[j] = -1;
+        sensor->temp_history[j] = -1;
+        sensor->hum_history[j] = -1;
+        sensor->pres_history[j] = -1;
+        sensor->time_offsets[j] = 0;
+    }
+
+    s_last_interval[index] = 0;
+    s_cumulative_minutes[index] = 0;
+}
+
+void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
+                                            int16_t temperature, uint16_t humidity,
+                                            uint16_t pressure, uint8_t interval_mins)
+{
+    if (index >= SENSOR_COUNT) {
+        return;
+    }
+
+    sensor_data_t *sensor = &s_sensors[index];
+
+    if (sensor->history_count == 0) {
+        s_cumulative_minutes[index] = 0;
+        s_last_interval[index] = interval_mins;
+    } else {
+        uint8_t prev = s_last_interval[index];
+        uint8_t curr = interval_mins;
+        uint16_t elapsed;
+
+        if (prev > curr) {
+            elapsed = prev - curr;
+        } else if (prev < curr) {
+            elapsed = prev + (60 - curr);
+        } else {
+            elapsed = 0;
+        }
+
+        s_cumulative_minutes[index] += elapsed;
+        s_last_interval[index] = curr;
+    }
+
+    sensor->co2_history[sensor->history_head] = (int16_t)co2_ppm;
+    sensor->temp_history[sensor->history_head] = temperature;
+    sensor->hum_history[sensor->history_head] = (int16_t)humidity;
+    sensor->pres_history[sensor->history_head] = (int16_t)pressure;
+    sensor->time_offsets[sensor->history_head] = s_cumulative_minutes[index];
+    sensor->history_head = (sensor->history_head + 1) % SENSOR_HISTORY_SIZE;
+
+    if (sensor->history_count < SENSOR_HISTORY_SIZE) {
+        sensor->history_count++;
+    }
+
+    sensor->total_minutes = s_cumulative_minutes[index];
+}
+
+uint16_t sensor_data_get_total_minutes(uint8_t index)
+{
+    if (index >= SENSOR_COUNT) {
+        return 0;
+    }
+    return s_sensors[index].total_minutes;
+}
+
+const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
+{
+    if (index >= SENSOR_COUNT) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    sensor_data_t *sensor = &s_sensors[index];
+
+    if (out_count) {
+        *out_count = sensor->history_count;
+    }
+
+    if (sensor->history_count == 0) {
+        return s_time_offsets_buffer;
+    }
+
+    uint8_t start;
+    if (sensor->history_count < SENSOR_HISTORY_SIZE) {
+        start = 0;
+    } else {
+        start = sensor->history_head;
+    }
+
+    uint16_t total = sensor->total_minutes;
+    for (uint8_t i = 0; i < sensor->history_count; i++) {
+        uint8_t src_idx = (start + i) % SENSOR_HISTORY_SIZE;
+        s_time_offsets_buffer[i] = total - sensor->time_offsets[src_idx];
+    }
+
+    for (uint8_t i = sensor->history_count; i < SENSOR_HISTORY_SIZE; i++) {
+        s_time_offsets_buffer[i] = 0;
+    }
+
+    return s_time_offsets_buffer;
 }
 
 co2_status_t sensor_data_get_co2_status(uint16_t co2_ppm)

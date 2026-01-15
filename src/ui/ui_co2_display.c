@@ -130,6 +130,32 @@ static lv_obj_t *s_detail_y_labels_pres[5];
 static lv_obj_t *s_detail_chart_container = NULL;
 static int s_plot_left_x = 2;
 static int s_plot_right_x = 0;
+static lv_obj_t *s_detail_x_labels[3] = {NULL, NULL, NULL};
+
+static void format_time_label(uint16_t minutes, char *buf, size_t buf_size)
+{
+    if (minutes == 0) {
+        snprintf(buf, buf_size, "now");
+    } else if (minutes < 60) {
+        snprintf(buf, buf_size, "-%um", minutes);
+    } else if (minutes < 1440) {
+        uint16_t hours = minutes / 60;
+        uint16_t mins = minutes % 60;
+        if (mins == 0) {
+            snprintf(buf, buf_size, "-%uh", hours);
+        } else {
+            snprintf(buf, buf_size, "-%uh %um", hours, mins);
+        }
+    } else {
+        uint16_t days = minutes / 1440;
+        uint16_t hours = (minutes % 1440) / 60;
+        if (hours == 0) {
+            snprintf(buf, buf_size, "-%ud", days);
+        } else {
+            snprintf(buf, buf_size, "-%ud %uh", days, hours);
+        }
+    }
+}
 
 static void lvgl_tick_cb(void *arg)
 {
@@ -415,6 +441,19 @@ static void update_detail_screen(int sensor_idx)
     if (s_selected_metric != -1) {
         update_metric_selection();
     }
+
+    uint16_t total_mins = sensor_data_get_total_minutes(sensor_idx);
+    if (total_mins > 0 && s_detail_x_labels[0] != NULL) {
+        char label_buf[16];
+
+        format_time_label(total_mins, label_buf, sizeof(label_buf));
+        lv_label_set_text(s_detail_x_labels[0], label_buf);
+
+        format_time_label(total_mins / 2, label_buf, sizeof(label_buf));
+        lv_label_set_text(s_detail_x_labels[1], label_buf);
+
+        lv_label_set_text(s_detail_x_labels[2], "now");
+    }
 }
 
 static lv_obj_t *create_metric_card(lv_obj_t *parent, int x, int y, int w, int h,
@@ -602,23 +641,23 @@ static void create_detail_screen(void)
     }
 
     int chart_w = plot_right - plot_left;
-    lv_obj_t *x_lbl1 = lv_label_create(chart_container);
-    lv_obj_set_style_text_color(x_lbl1, lv_color_hex(COLOR_TEXT_DIM), 0);
-    lv_obj_set_style_text_font(x_lbl1, &lv_font_montserrat_12, 0);
-    lv_label_set_text(x_lbl1, "-60m");
-    lv_obj_set_pos(x_lbl1, plot_left, plot_bottom + 4);
+    s_detail_x_labels[0] = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(s_detail_x_labels[0], lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(s_detail_x_labels[0], &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_detail_x_labels[0], "-60m");
+    lv_obj_set_pos(s_detail_x_labels[0], plot_left, plot_bottom + 4);
 
-    lv_obj_t *x_lbl2 = lv_label_create(chart_container);
-    lv_obj_set_style_text_color(x_lbl2, lv_color_hex(COLOR_TEXT_DIM), 0);
-    lv_obj_set_style_text_font(x_lbl2, &lv_font_montserrat_12, 0);
-    lv_label_set_text(x_lbl2, "-30m");
-    lv_obj_set_pos(x_lbl2, plot_left + chart_w / 2 - 15, plot_bottom + 4);
+    s_detail_x_labels[1] = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(s_detail_x_labels[1], lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(s_detail_x_labels[1], &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_detail_x_labels[1], "-30m");
+    lv_obj_set_pos(s_detail_x_labels[1], plot_left + chart_w / 2 - 15, plot_bottom + 4);
 
-    lv_obj_t *x_lbl3 = lv_label_create(chart_container);
-    lv_obj_set_style_text_color(x_lbl3, lv_color_hex(COLOR_TEXT_DIM), 0);
-    lv_obj_set_style_text_font(x_lbl3, &lv_font_montserrat_12, 0);
-    lv_label_set_text(x_lbl3, "now");
-    lv_obj_set_pos(x_lbl3, plot_right - 24, plot_bottom + 4);
+    s_detail_x_labels[2] = lv_label_create(chart_container);
+    lv_obj_set_style_text_color(s_detail_x_labels[2], lv_color_hex(COLOR_TEXT_DIM), 0);
+    lv_obj_set_style_text_font(s_detail_x_labels[2], &lv_font_montserrat_12, 0);
+    lv_label_set_text(s_detail_x_labels[2], "now");
+    lv_obj_set_pos(s_detail_x_labels[2], plot_right - 24, plot_bottom + 4);
 
 }
 
