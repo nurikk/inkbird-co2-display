@@ -1,3 +1,15 @@
+/**
+ * @file ui_co2_display.c
+ * @brief LVGL-based user interface for CO2 sensor display
+ *
+ * Implements a multi-screen UI with:
+ * - Main dashboard: 2x2 grid of sensor tiles with mini charts
+ * - Detail screen: Full sensor details with multi-metric chart
+ * - Settings screen: Device configuration (thresholds, calibration)
+ *
+ * Uses LVGL graphics library for rendering on TFT display.
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>

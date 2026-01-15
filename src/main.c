@@ -4,6 +4,14 @@
  *
  * ESP32 based CO2 sensor display using 2.4" TFT.
  * Displays readings from 4 Inkbird IAM-T1 CO2 sensors via BLE.
+ *
+ * Boot sequence:
+ * 1. Initialize display and show loading screen
+ * 2. Initialize BLE stack
+ * 3. Discover sensors
+ * 4. Read initial sensor values
+ * 5. Download historical data (optional)
+ * 6. Start periodic sensor polling
  */
 
 #include <stdio.h>
@@ -17,7 +25,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "driver/gpio.h"
 
 #include "lvgl.h"
 
@@ -27,12 +34,9 @@
 #include "sensor_data.h"
 #include "ui_co2_display.h"
 #include "inkbird_ble.h"
+#include "led_control.h"
 
 static const char *TAG = "main";
-
-#define LED_RED_PIN     GPIO_NUM_4
-#define LED_GREEN_PIN   GPIO_NUM_17
-#define LED_BLUE_PIN    GPIO_NUM_16
 
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
@@ -50,10 +54,6 @@ static const char *TAG = "main";
 // Core affinity - separate display from BLE to avoid starvation
 #define CORE_BLE      0
 #define CORE_DISPLAY  1
-
-// LED CO2 thresholds
-#define LED_CO2_RED_THRESHOLD   1400    // CO2 ppm threshold for red LED
-#define LED_CO2_YELLOW_THRESHOLD 800    // CO2 ppm threshold for yellow LED
 
 // History download configuration
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
@@ -77,46 +77,6 @@ static void progress_update_cb(TimerHandle_t timer)
 {
     (void)timer;
     s_do_refresh = true;
-}
-
-
-static void led_init(void)
-{
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << LED_RED_PIN) | (1ULL << LED_GREEN_PIN) | (1ULL << LED_BLUE_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
-    gpio_set_level(LED_RED_PIN, 1);
-    gpio_set_level(LED_GREEN_PIN, 1);
-    gpio_set_level(LED_BLUE_PIN, 1);
-}
-
-static void led_set_color(bool red, bool green, bool blue)
-{
-    gpio_set_level(LED_RED_PIN, !red);
-    gpio_set_level(LED_GREEN_PIN, !green);
-    gpio_set_level(LED_BLUE_PIN, !blue);
-}
-
-static void led_update_from_co2(void)
-{
-    sensor_data_t *sensor = sensor_data_get(0);
-    if (!sensor || !sensor->connected || sensor->current.co2_ppm == 0) {
-        return;
-    }
-
-    uint16_t co2 = sensor->current.co2_ppm;
-    if (co2 >= LED_CO2_RED_THRESHOLD) {
-        led_set_color(true, false, false);
-    } else if (co2 >= LED_CO2_YELLOW_THRESHOLD) {
-        led_set_color(true, true, false);
-    } else {
-        led_set_color(false, true, false);
-    }
 }
 
 /**
