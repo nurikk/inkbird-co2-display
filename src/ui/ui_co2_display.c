@@ -122,6 +122,15 @@ static int32_t s_detail_temp_data[SENSOR_HISTORY_SIZE];
 static int32_t s_detail_hum_data[SENSOR_HISTORY_SIZE];
 static int32_t s_detail_pres_data[SENSOR_HISTORY_SIZE];
 
+static int s_selected_metric = -1;
+static lv_obj_t *s_detail_y_labels_co2[5];
+static lv_obj_t *s_detail_y_labels_temp[5];
+static lv_obj_t *s_detail_y_labels_hum[5];
+static lv_obj_t *s_detail_y_labels_pres[5];
+static lv_obj_t *s_detail_chart_container = NULL;
+static int s_plot_left_x = 2;
+static int s_plot_right_x = 0;
+
 static void lvgl_tick_cb(void *arg)
 {
     (void)arg;
@@ -190,10 +199,92 @@ static lv_color_t status_color(co2_status_t status)
     }
 }
 
+static void update_metric_selection(void)
+{
+    lv_obj_t *cards[] = {s_detail_co2_card, s_detail_temp_card, s_detail_hum_card, s_detail_pres_card};
+    uint32_t colors[] = {COLOR_GOOD, COLOR_TEMP, COLOR_HUMIDITY, COLOR_PRESSURE};
+    lv_chart_series_t *series[] = {s_detail_co2_series, s_detail_temp_series, s_detail_hum_series, s_detail_pres_series};
+
+    for (int i = 0; i < 4; i++) {
+        if (cards[i] == NULL) continue;
+
+        if (s_selected_metric == i) {
+            lv_obj_set_style_border_width(cards[i], 2, 0);
+            lv_obj_set_style_border_color(cards[i], lv_color_hex(colors[i]), 0);
+        } else {
+            lv_obj_set_style_border_width(cards[i], 0, 0);
+        }
+    }
+
+    static int32_t hidden_data[SENSOR_HISTORY_SIZE];
+    static bool hidden_data_init = false;
+    if (!hidden_data_init) {
+        for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+            hidden_data[j] = LV_CHART_POINT_NONE;
+        }
+        hidden_data_init = true;
+    }
+
+    int32_t *data_arrays[] = {s_detail_co2_data, s_detail_temp_data, s_detail_hum_data, s_detail_pres_data};
+
+    for (int i = 0; i < 4; i++) {
+        if (series[i] == NULL) continue;
+
+        bool should_hide = (s_selected_metric != -1 && s_selected_metric != i);
+        if (should_hide) {
+            lv_chart_set_series_values(s_detail_chart, series[i], hidden_data, SENSOR_HISTORY_SIZE);
+        } else {
+            lv_chart_set_series_values(s_detail_chart, series[i], data_arrays[i], SENSOR_HISTORY_SIZE);
+        }
+    }
+
+    lv_obj_t **all_labels[] = {s_detail_y_labels_co2, s_detail_y_labels_temp, s_detail_y_labels_hum, s_detail_y_labels_pres};
+
+    for (int i = 0; i < 5; i++) {
+        for (int m = 0; m < 4; m++) {
+            if (all_labels[m][i] == NULL) continue;
+
+            bool show = false;
+            if (s_selected_metric == -1) {
+                show = (m == 0 || m == 1);
+            } else {
+                show = (s_selected_metric == m);
+            }
+
+            if (show) {
+                lv_obj_clear_flag(all_labels[m][i], LV_OBJ_FLAG_HIDDEN);
+                if (s_selected_metric != -1) {
+                    lv_coord_t y = lv_obj_get_y(all_labels[m][i]);
+                    lv_obj_set_pos(all_labels[m][i], s_plot_left_x, y);
+                } else if (m == 1) {
+                    lv_coord_t y = lv_obj_get_y(all_labels[m][i]);
+                    lv_obj_set_pos(all_labels[m][i], s_plot_right_x, y);
+                }
+            } else {
+                lv_obj_add_flag(all_labels[m][i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+}
+
+static void metric_card_click_cb(lv_event_t *e)
+{
+    int metric_idx = (int)(intptr_t)lv_event_get_user_data(e);
+
+    if (s_selected_metric == metric_idx) {
+        s_selected_metric = -1;
+    } else {
+        s_selected_metric = metric_idx;
+    }
+
+    update_metric_selection();
+}
+
 static void back_btn_event_cb(lv_event_t *e)
 {
     (void)e;
     s_selected_sensor = -1;
+    s_selected_metric = -1;
     lv_screen_load(s_main_screen);
 }
 
@@ -320,6 +411,10 @@ static void update_detail_screen(int sensor_idx)
         }
         lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
     }
+
+    if (s_selected_metric != -1) {
+        update_metric_selection();
+    }
 }
 
 static lv_obj_t *create_metric_card(lv_obj_t *parent, int x, int y, int w, int h,
@@ -381,6 +476,8 @@ static void create_detail_screen(void)
     int start_x = (480 - total_w) / 2;
 
     s_detail_co2_card = create_metric_card(s_detail_screen, start_x, cards_y, card_w, card_h, COLOR_GOOD, "CO2");
+    lv_obj_add_flag(s_detail_co2_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_detail_co2_card, metric_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
     s_detail_co2_value = lv_label_create(s_detail_co2_card);
     lv_obj_set_style_text_color(s_detail_co2_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
     lv_obj_set_style_text_font(s_detail_co2_value, &lv_font_montserrat_14, 0);
@@ -388,6 +485,8 @@ static void create_detail_screen(void)
     lv_obj_set_pos(s_detail_co2_value, 6, 12);
 
     s_detail_temp_card = create_metric_card(s_detail_screen, start_x + card_w + gap, cards_y, card_w, card_h, COLOR_TEMP, "TEMP");
+    lv_obj_add_flag(s_detail_temp_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_detail_temp_card, metric_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
     s_detail_temp_value = lv_label_create(s_detail_temp_card);
     lv_obj_set_style_text_color(s_detail_temp_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
     lv_obj_set_style_text_font(s_detail_temp_value, &lv_font_montserrat_14, 0);
@@ -395,6 +494,8 @@ static void create_detail_screen(void)
     lv_obj_set_pos(s_detail_temp_value, 6, 12);
 
     s_detail_hum_card = create_metric_card(s_detail_screen, start_x + 2 * (card_w + gap), cards_y, card_w, card_h, COLOR_HUMIDITY, "HUMIDITY");
+    lv_obj_add_flag(s_detail_hum_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_detail_hum_card, metric_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)2);
     s_detail_hum_value = lv_label_create(s_detail_hum_card);
     lv_obj_set_style_text_color(s_detail_hum_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
     lv_obj_set_style_text_font(s_detail_hum_value, &lv_font_montserrat_14, 0);
@@ -402,6 +503,8 @@ static void create_detail_screen(void)
     lv_obj_set_pos(s_detail_hum_value, 6, 12);
 
     s_detail_pres_card = create_metric_card(s_detail_screen, start_x + 3 * (card_w + gap), cards_y, card_w, card_h, COLOR_PRESSURE, "PRESSURE");
+    lv_obj_add_flag(s_detail_pres_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_detail_pres_card, metric_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)3);
     s_detail_pres_value = lv_label_create(s_detail_pres_card);
     lv_obj_set_style_text_color(s_detail_pres_value, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
     lv_obj_set_style_text_font(s_detail_pres_value, &lv_font_montserrat_14, 0);
@@ -411,7 +514,8 @@ static void create_detail_screen(void)
     int chart_container_top = 92;
     int chart_container_h = 320 - chart_container_top - 8;
 
-    lv_obj_t *chart_container = lv_obj_create(s_detail_screen);
+    s_detail_chart_container = lv_obj_create(s_detail_screen);
+    lv_obj_t *chart_container = s_detail_chart_container;
     lv_obj_set_pos(chart_container, 12, chart_container_top);
     lv_obj_set_size(chart_container, 480 - 24, chart_container_h);
     lv_obj_set_style_bg_color(chart_container, lv_color_hex(COLOR_BG_CHART), 0);
@@ -425,6 +529,8 @@ static void create_detail_screen(void)
     int plot_bottom = chart_container_h - 20;
     int plot_left = 32;
     int plot_right = 480 - 24 - 28;
+    s_plot_left_x = 2;
+    s_plot_right_x = plot_right + 4;
 
     s_detail_chart = lv_chart_create(chart_container);
     lv_obj_set_pos(s_detail_chart, plot_left, plot_top);
@@ -459,6 +565,7 @@ static void create_detail_screen(void)
         lv_obj_set_style_text_font(y_lbl, &lv_font_montserrat_12, 0);
         lv_label_set_text(y_lbl, y_labels[i]);
         lv_obj_set_pos(y_lbl, 2, plot_top + i * y_div - 6);
+        s_detail_y_labels_co2[i] = y_lbl;
     }
 
     const char *y_temp_labels[] = {"30", "26", "22", "18", "15"};
@@ -469,6 +576,29 @@ static void create_detail_screen(void)
         lv_obj_set_style_text_font(yt_lbl, &lv_font_montserrat_12, 0);
         lv_label_set_text(yt_lbl, y_temp_labels[i]);
         lv_obj_set_pos(yt_lbl, plot_right + 4, plot_top + i * y_div - 6);
+        s_detail_y_labels_temp[i] = yt_lbl;
+    }
+
+    const char *y_hum_labels[] = {"80%", "65%", "50%", "35%", "20%"};
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *yh_lbl = lv_label_create(chart_container);
+        lv_obj_set_style_text_color(yh_lbl, lv_color_hex(COLOR_HUMIDITY), 0);
+        lv_obj_set_style_text_font(yh_lbl, &lv_font_montserrat_12, 0);
+        lv_label_set_text(yh_lbl, y_hum_labels[i]);
+        lv_obj_set_pos(yh_lbl, plot_right + 4, plot_top + i * y_div - 6);
+        s_detail_y_labels_hum[i] = yh_lbl;
+        lv_obj_add_flag(yh_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    const char *y_pres_labels[] = {"1050", "1025", "1000", "975", "950"};
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *yp_lbl = lv_label_create(chart_container);
+        lv_obj_set_style_text_color(yp_lbl, lv_color_hex(COLOR_PRESSURE), 0);
+        lv_obj_set_style_text_font(yp_lbl, &lv_font_montserrat_12, 0);
+        lv_label_set_text(yp_lbl, y_pres_labels[i]);
+        lv_obj_set_pos(yp_lbl, plot_right + 4, plot_top + i * y_div - 6);
+        s_detail_y_labels_pres[i] = yp_lbl;
+        lv_obj_add_flag(yp_lbl, LV_OBJ_FLAG_HIDDEN);
     }
 
     int chart_w = plot_right - plot_left;
