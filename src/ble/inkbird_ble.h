@@ -247,6 +247,26 @@ uint8_t inkbird_ble_get_discovered_count(void);
 esp_err_t inkbird_ble_get_discovered(uint8_t index, inkbird_discovered_t *out_info);
 
 /**
+ * @brief Register discovered sensors to active sensor list
+ *
+ * After running inkbird_ble_discover(), call this function to add
+ * newly discovered sensors to the active sensor list. Configured
+ * sensors (from inkbird_config.h) have priority and are loaded first.
+ * Discovered sensors that aren't already configured will be added
+ * to any remaining slots.
+ */
+void inkbird_ble_register_discovered(void);
+
+/**
+ * @brief Get number of active sensors
+ *
+ * Returns the count of sensors currently active (configured + auto-discovered).
+ *
+ * @return Number of active sensors (0 to INKBIRD_SENSOR_COUNT)
+ */
+uint8_t inkbird_ble_get_active_count(void);
+
+/**
  * @brief Get sensor name from configuration
  *
  * @param index Sensor index (0 to INKBIRD_SENSOR_COUNT-1)

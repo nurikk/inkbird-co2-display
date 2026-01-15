@@ -53,17 +53,17 @@ static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
         .name = "Office",
         .enabled = true
     },
-    // Sensor 1 - Update MAC after discovery
+    // Sensor 1 - Leysan (Ink@IAM-T1)
     {
-        .mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-        .name = "Bedroom",
-        .enabled = false
+        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB2, 0x79},
+        .name = "Leysan",
+        .enabled = true
     },
-    // Sensor 2 - Update MAC after discovery
+    // Sensor 2 - Bedroom (Ink@IAM-T1)
     {
-        .mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-        .name = "Living Room",
-        .enabled = false
+        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB3, 0x93},
+        .name = "Bedroom",
+        .enabled = true
     },
     // Sensor 3 - Update MAC after discovery
     {

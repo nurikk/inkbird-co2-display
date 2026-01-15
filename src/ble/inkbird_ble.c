@@ -17,6 +17,7 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "soc/rtc_cntl_reg.h"
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
@@ -79,6 +80,10 @@ static inkbird_co2_thresholds_t s_thresholds[INKBIRD_SENSOR_COUNT];
 // Failure tracking for each sensor
 static uint8_t s_failure_count[INKBIRD_SENSOR_COUNT];
 static uint8_t s_skip_cycles[INKBIRD_SENSOR_COUNT];
+
+// Runtime sensor registry (configured sensors + auto-discovered)
+static inkbird_sensor_config_t s_active_sensors[INKBIRD_SENSOR_COUNT];
+static uint8_t s_active_sensor_count = 0;
 
 // Discovered sensors storage
 static inkbird_discovered_t s_discovered[INKBIRD_MAX_DISCOVERED];
@@ -175,6 +180,18 @@ esp_err_t inkbird_ble_init(void)
     memset(s_failure_count, 0, sizeof(s_failure_count));
     memset(s_skip_cycles, 0, sizeof(s_skip_cycles));
 
+    // Initialize active sensors registry with configured sensors (priority)
+    memset(s_active_sensors, 0, sizeof(s_active_sensors));
+    s_active_sensor_count = 0;
+    for (int i = 0; i < INKBIRD_SENSOR_COUNT; i++) {
+        if (INKBIRD_SENSORS[i].enabled) {
+            s_active_sensors[s_active_sensor_count] = INKBIRD_SENSORS[i];
+            ESP_LOGI(TAG, "Configured sensor %d: %s", s_active_sensor_count, INKBIRD_SENSORS[i].name);
+            s_active_sensor_count++;
+        }
+    }
+    ESP_LOGI(TAG, "Loaded %d configured sensor(s)", s_active_sensor_count);
+
     // Initialize thresholds with protocol defaults (will be overwritten if sensor responds)
     // Default to normal mode (420-2000 PPM) - most common configuration
     for (int i = 0; i < INKBIRD_SENSOR_COUNT; i++) {
@@ -203,6 +220,12 @@ esp_err_t inkbird_ble_init(void)
 
     // Release BT classic memory (we only use BLE)
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    // Disable brownout detector during RF calibration (can cause reset on weak power supply)
+    ESP_LOGI(TAG, "Free heap before BLE: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGW(TAG, "Disabling brownout detector for RF calibration...");
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     // Initialize BT controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -274,19 +297,14 @@ esp_err_t inkbird_ble_start(void)
         return ESP_OK;
     }
 
-    // Check if any sensors are enabled
-    bool any_enabled = false;
-    for (int i = 0; i < INKBIRD_SENSOR_COUNT; i++) {
-        if (INKBIRD_SENSORS[i].enabled) {
-            any_enabled = true;
-            ESP_LOGI(TAG, "Sensor %d enabled: %s", i, INKBIRD_SENSORS[i].name);
+    // Check if any sensors are active
+    if (s_active_sensor_count == 0) {
+        ESP_LOGW(TAG, "No active sensors");
+        ESP_LOGW(TAG, "Run inkbird_ble_discover() then inkbird_ble_register_discovered()");
+    } else {
+        for (int i = 0; i < s_active_sensor_count; i++) {
+            ESP_LOGI(TAG, "Active sensor %d: %s", i, s_active_sensors[i].name);
         }
-    }
-
-    if (!any_enabled) {
-        ESP_LOGW(TAG, "No sensors enabled in configuration");
-        ESP_LOGW(TAG, "Run inkbird_ble_discover() to find sensors");
-        ESP_LOGW(TAG, "Then update inkbird_config.h with MAC addresses");
     }
 
     s_running = true;
@@ -375,18 +393,18 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (sensor_idx >= INKBIRD_SENSOR_COUNT) {
-        ESP_LOGE(TAG, "Invalid sensor index: %d", sensor_idx);
+    if (sensor_idx >= s_active_sensor_count) {
+        ESP_LOGE(TAG, "Invalid sensor index: %d (active count: %d)", sensor_idx, s_active_sensor_count);
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!INKBIRD_SENSORS[sensor_idx].enabled) {
+    if (!s_active_sensors[sensor_idx].enabled) {
         ESP_LOGE(TAG, "Sensor %d is not enabled", sensor_idx);
         return ESP_ERR_INVALID_ARG;
     }
 
     ESP_LOGI(TAG, "One-shot read: sensor %d (%s), timeout %lu ms",
-             sensor_idx, INKBIRD_SENSORS[sensor_idx].name, timeout_ms);
+             sensor_idx, s_active_sensors[sensor_idx].name, timeout_ms);
 
     // Close any existing connection first
     if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
@@ -404,7 +422,7 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;  // Reset connection state
-    memcpy(s_target_bda, INKBIRD_SENSORS[sensor_idx].mac, 6);
+    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
              s_target_bda[0], s_target_bda[1], s_target_bda[2],
@@ -549,20 +567,64 @@ esp_err_t inkbird_ble_get_discovered(uint8_t index, inkbird_discovered_t *out_in
     return ESP_OK;
 }
 
+void inkbird_ble_register_discovered(void)
+{
+    ESP_LOGI(TAG, "Registering discovered sensors...");
+
+    for (int i = 0; i < s_discovered_count && s_active_sensor_count < INKBIRD_SENSOR_COUNT; i++) {
+        bool already_known = false;
+        for (int j = 0; j < s_active_sensor_count; j++) {
+            if (memcmp(s_active_sensors[j].mac, s_discovered[i].mac, 6) == 0) {
+                already_known = true;
+                ESP_LOGI(TAG, "  Sensor %02X:%02X:%02X:%02X:%02X:%02X already configured as '%s'",
+                         s_discovered[i].mac[0], s_discovered[i].mac[1],
+                         s_discovered[i].mac[2], s_discovered[i].mac[3],
+                         s_discovered[i].mac[4], s_discovered[i].mac[5],
+                         s_active_sensors[j].name);
+                break;
+            }
+        }
+        if (!already_known) {
+            inkbird_sensor_config_t *slot = &s_active_sensors[s_active_sensor_count];
+            memcpy(slot->mac, s_discovered[i].mac, 6);
+            if (s_discovered[i].name[0]) {
+                strncpy(slot->name, s_discovered[i].name, sizeof(slot->name) - 1);
+                slot->name[sizeof(slot->name) - 1] = '\0';
+            } else {
+                snprintf(slot->name, sizeof(slot->name), "Sensor %d", s_active_sensor_count);
+            }
+            slot->enabled = true;
+            ESP_LOGI(TAG, "  Auto-registered sensor %d: %02X:%02X:%02X:%02X:%02X:%02X as '%s'",
+                     s_active_sensor_count,
+                     slot->mac[0], slot->mac[1], slot->mac[2],
+                     slot->mac[3], slot->mac[4], slot->mac[5],
+                     slot->name);
+            s_active_sensor_count++;
+        }
+    }
+
+    ESP_LOGI(TAG, "Total active sensors: %d", s_active_sensor_count);
+}
+
+uint8_t inkbird_ble_get_active_count(void)
+{
+    return s_active_sensor_count;
+}
+
 const char *inkbird_ble_get_sensor_name(uint8_t index)
 {
-    if (index >= INKBIRD_SENSOR_COUNT) {
+    if (index >= s_active_sensor_count) {
         return "Unknown";
     }
-    return INKBIRD_SENSORS[index].name;
+    return s_active_sensors[index].name;
 }
 
 bool inkbird_ble_is_sensor_enabled(uint8_t index)
 {
-    if (index >= INKBIRD_SENSOR_COUNT) {
+    if (index >= s_active_sensor_count) {
         return false;
     }
-    return INKBIRD_SENSORS[index].enabled;
+    return s_active_sensors[index].enabled;
 }
 
 inkbird_co2_thresholds_t inkbird_ble_get_thresholds(uint8_t index)
@@ -1134,7 +1196,7 @@ static bool parse_inkbird_data(const uint8_t *data, size_t len, uint8_t sensor_i
         xSemaphoreGive(s_ble_mutex);
 
         ESP_LOGI(TAG, "=== SENSOR DATA ===");
-        ESP_LOGI(TAG, "  Sensor %d [%s]:", sensor_idx, INKBIRD_SENSORS[sensor_idx].name);
+        ESP_LOGI(TAG, "  Sensor %d [%s]:", sensor_idx, s_active_sensors[sensor_idx].name);
         ESP_LOGI(TAG, "  CO2: %u ppm", reading->co2_ppm);
         ESP_LOGI(TAG, "  Temperature: %.1f C", reading->temperature / 10.0f);
         ESP_LOGI(TAG, "  Humidity: %.1f%%", reading->humidity / 10.0f);
@@ -1166,10 +1228,10 @@ static void read_task(void *arg)
     ESP_LOGI(TAG, "Read task started");
 
     while (s_running) {
-        // Round-robin through all sensors
-        for (int i = 0; i < INKBIRD_SENSOR_COUNT && s_running; i++) {
+        // Round-robin through all active sensors
+        for (int i = 0; i < s_active_sensor_count && s_running; i++) {
             // Skip if sensor not enabled
-            if (!INKBIRD_SENSORS[i].enabled) {
+            if (!s_active_sensors[i].enabled) {
                 continue;
             }
 
@@ -1180,12 +1242,12 @@ static void read_task(void *arg)
                 continue;
             }
 
-            ESP_LOGI(TAG, "Reading sensor %d: %s", i, INKBIRD_SENSORS[i].name);
+            ESP_LOGI(TAG, "Reading sensor %d: %s", i, s_active_sensors[i].name);
             s_current_sensor_index = i;
             s_data_received = false;
 
             // Copy target MAC address
-            memcpy(s_target_bda, INKBIRD_SENSORS[i].mac, 6);
+            memcpy(s_target_bda, s_active_sensors[i].mac, 6);
 
             ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
                      s_target_bda[0], s_target_bda[1], s_target_bda[2],
@@ -1508,8 +1570,8 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (sensor_idx >= INKBIRD_SENSOR_COUNT || !INKBIRD_SENSORS[sensor_idx].enabled) {
-        ESP_LOGE(TAG, "Invalid or disabled sensor index: %d", sensor_idx);
+    if (sensor_idx >= s_active_sensor_count || !s_active_sensors[sensor_idx].enabled) {
+        ESP_LOGE(TAG, "Invalid or disabled sensor index: %d (active: %d)", sensor_idx, s_active_sensor_count);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -1537,13 +1599,13 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  Starting History Download");
-    ESP_LOGI(TAG, "  Sensor: %d (%s)", sensor_idx, INKBIRD_SENSORS[sensor_idx].name);
+    ESP_LOGI(TAG, "  Sensor: %d (%s)", sensor_idx, s_active_sensors[sensor_idx].name);
     ESP_LOGI(TAG, "  Max records: %u", max_records);
     ESP_LOGI(TAG, "========================================");
 
     // Connect to sensor
     s_current_sensor_index = sensor_idx;
-    memcpy(s_target_bda, INKBIRD_SENSORS[sensor_idx].mac, 6);
+    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
     s_data_received = false;
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",

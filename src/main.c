@@ -207,7 +207,8 @@ static void sensor_update_cb(TimerHandle_t timer)
     (void)timer;
 
     // Copy readings from BLE module to sensor_data
-    for (int i = 0; i < SENSOR_COUNT; i++) {
+    uint8_t active = inkbird_ble_get_active_count();
+    for (int i = 0; i < active; i++) {
         inkbird_reading_t ble_reading = inkbird_ble_get_reading(i);
 
         if (ble_reading.valid) {
@@ -307,7 +308,8 @@ static bool read_initial_sensor_value(int sensor_idx)
  */
 static bool any_sensor_downloading(void)
 {
-    for (int i = 0; i < SENSOR_COUNT; i++) {
+    uint8_t active = inkbird_ble_get_active_count();
+    for (int i = 0; i < active; i++) {
         sensor_data_t *sensor = sensor_data_get(i);
         if (sensor && sensor->downloading) {
             return true;
@@ -380,24 +382,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing sensor data...");
     sensor_data_init();
 
-    // Set sensor names from BLE configuration
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
-        }
-    }
-
-    // Initialize UI
+    // Initialize UI first (with empty tiles)
     ESP_LOGI(TAG, "Initializing UI...");
     ui_co2_display_init();
     ESP_LOGI(TAG, "UI initialized - check serial for touch status");
-
-    // Set initial status for all enabled sensors
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_set_status(i, "Waiting...");
-        }
-    }
 
     // Initialize BLE for Inkbird sensors
     ESP_LOGI(TAG, "Initializing Bluetooth for Inkbird sensors...");
@@ -405,6 +393,25 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE init failed!");
         return;
+    }
+
+    // Run discovery to find all nearby Inkbird sensors
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Discovering Inkbird Sensors...");
+    ESP_LOGI(TAG, "========================================");
+    inkbird_ble_discover();
+
+    // Register any newly discovered sensors to active list
+    inkbird_ble_register_discovered();
+
+    // Get active sensor count and set up sensor names
+    uint8_t active_count = inkbird_ble_get_active_count();
+    ESP_LOGI(TAG, "Active sensors: %d", active_count);
+
+    for (int i = 0; i < active_count; i++) {
+        sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
+        sensor_data_set_status(i, "Waiting...");
     }
 
     ESP_LOGI(TAG, "Starting display task...");
@@ -427,13 +434,11 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  Phase 1: Reading Current Sensor Values");
     ESP_LOGI(TAG, "========================================");
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_set_status(i, "Connecting...");
-            s_do_refresh = true;
-            read_initial_sensor_value(i);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+    for (int i = 0; i < active_count; i++) {
+        sensor_data_set_status(i, "Connecting...");
+        s_do_refresh = true;
+        read_initial_sensor_value(i);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     // ========== PHASE 2: Render display with current values ==========
@@ -455,12 +460,10 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     // Mark sensors as downloading (for internal state tracking)
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            sensor_data_t *sensor = sensor_data_get(i);
-            if (sensor) {
-                sensor->downloading = true;
-            }
+    for (int i = 0; i < active_count; i++) {
+        sensor_data_t *sensor = sensor_data_get(i);
+        if (sensor) {
+            sensor->downloading = true;
         }
     }
 
@@ -469,11 +472,9 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(500));
 
     // Download history from each sensor
-    for (int i = 0; i < SENSOR_COUNT; i++) {
-        if (inkbird_ble_is_sensor_enabled(i)) {
-            download_sensor_history(i);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
+    for (int i = 0; i < active_count; i++) {
+        download_sensor_history(i);
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 
     // Final display refresh with history charts
