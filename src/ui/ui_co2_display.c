@@ -25,8 +25,8 @@ typedef enum {
 
 static touch_type_t s_touch_type = TOUCH_TYPE_NONE;
 
-#define DISPLAY_WIDTH 480
-#define DISPLAY_HEIGHT 320
+#define UI_DISPLAY_WIDTH 480
+#define UI_DISPLAY_HEIGHT 320
 
 #define GRID_COLS 2
 #define GRID_ROWS 2
@@ -577,7 +577,7 @@ static void create_detail_screen(void)
     int card_w = DETAIL_CARD_WIDTH;
     int gap = DETAIL_CARD_GAP;
     int total_w = (card_w * 4) + (gap * 3);
-    int start_x = (DISPLAY_WIDTH - total_w) / 2;
+    int start_x = (UI_DISPLAY_WIDTH - total_w) / 2;
 
     s_detail_co2_card = create_metric_card(s_detail_screen, start_x, cards_y, card_w, card_h, COLOR_GOOD, "CO2");
     lv_obj_add_flag(s_detail_co2_card, LV_OBJ_FLAG_CLICKABLE);
@@ -616,8 +616,8 @@ static void create_detail_screen(void)
     lv_obj_set_pos(s_detail_pres_value, DETAIL_CARD_VALUE_X, DETAIL_CARD_VALUE_Y);
 
     int chart_container_top = DETAIL_CHART_TOP;
-    int chart_container_h = DISPLAY_HEIGHT - chart_container_top - DETAIL_CHART_MARGIN_BOTTOM;
-    int chart_container_w = DISPLAY_WIDTH - (DETAIL_CHART_MARGIN_X * 2);
+    int chart_container_h = UI_DISPLAY_HEIGHT - chart_container_top - DETAIL_CHART_MARGIN_BOTTOM;
+    int chart_container_w = UI_DISPLAY_WIDTH - (DETAIL_CHART_MARGIN_X * 2);
 
     s_detail_chart_container = lv_obj_create(s_detail_screen);
     lv_obj_t *chart_container = s_detail_chart_container;
@@ -850,8 +850,8 @@ static void create_ui(void)
     lv_obj_set_style_bg_grad_dir(s_main_screen, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(s_main_screen, LV_OPA_COVER, 0);
 
-    int tile_w = (DISPLAY_WIDTH - GRID_GAP * 3) / GRID_COLS;
-    int tile_h = (DISPLAY_HEIGHT - GRID_GAP * 3) / GRID_ROWS;
+    int tile_w = (UI_DISPLAY_WIDTH - GRID_GAP * 3) / GRID_COLS;
+    int tile_h = (UI_DISPLAY_HEIGHT - GRID_GAP * 3) / GRID_ROWS;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
         int col = i % GRID_COLS;
@@ -868,7 +868,7 @@ void ui_co2_display_init(void)
 {
     lv_init();
 
-    s_display = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    s_display = lv_display_create(UI_DISPLAY_WIDTH, UI_DISPLAY_HEIGHT);
     lv_display_set_default(s_display);
     lv_display_set_color_format(s_display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(s_display, lvgl_flush_cb);
@@ -883,7 +883,7 @@ void ui_co2_display_init(void)
     );
     lv_display_set_theme(s_display, theme);
 
-    size_t buf_pixels = DISPLAY_WIDTH * LVGL_BUFFER_LINES;
+    size_t buf_pixels = UI_DISPLAY_WIDTH * LVGL_BUFFER_LINES;
     size_t buf_size = buf_pixels * sizeof(lv_color_t);
 
     s_buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
