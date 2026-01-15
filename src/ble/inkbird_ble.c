@@ -39,6 +39,7 @@ static const char *TAG = "inkbird_ble";
 #define INVALID_HANDLE          0
 #define PROFILE_NUM             1
 #define PROFILE_APP_IDX         0
+#define BLE_TASK_CORE           0
 
 // Inkbird service and characteristic UUIDs (16-bit)
 #define INKBIRD_SVC_UUID16      0xFFE0
@@ -309,14 +310,15 @@ esp_err_t inkbird_ble_start(void)
 
     s_running = true;
 
-    // Create read task
-    BaseType_t xret = xTaskCreate(
+    // Create read task pinned to BLE core
+    BaseType_t xret = xTaskCreatePinnedToCore(
         read_task,
         "inkbird_read",
         4096,
         NULL,
         5,
-        &s_read_task_handle
+        &s_read_task_handle,
+        BLE_TASK_CORE
     );
 
     if (xret != pdPASS) {

@@ -40,10 +40,14 @@ static const char *TAG = "main";
 
 // Display task configuration
 #define DISPLAY_TASK_STACK_SIZE 8192
-#define DISPLAY_TASK_PRIORITY   5
+#define DISPLAY_TASK_PRIORITY   6
 #define UPDATE_INTERVAL_FAST_US 100000  // 100ms when downloading
 #define UPDATE_INTERVAL_NORMAL_US 500000 // 500ms normal operation
 #define TOUCH_STATUS_LOG_INTERVAL_US 60000000 // 60s between touch status logs
+
+// Core affinity - separate display from BLE to avoid starvation
+#define CORE_BLE      0
+#define CORE_DISPLAY  1
 
 // LED CO2 thresholds
 #define LED_CO2_RED_THRESHOLD   1400    // CO2 ppm threshold for red LED
@@ -457,14 +461,15 @@ void app_main(void)
         sensor_data_set_status(i, "Waiting...");
     }
 
-    ESP_LOGI(TAG, "Starting display task...");
-    xTaskCreate(
+    ESP_LOGI(TAG, "Starting display task on core %d...", CORE_DISPLAY);
+    xTaskCreatePinnedToCore(
         display_task,
         "display",
         DISPLAY_TASK_STACK_SIZE,
         NULL,
         DISPLAY_TASK_PRIORITY,
-        NULL
+        NULL,
+        CORE_DISPLAY
     );
 
     // Initial display refresh to show tiles with status
@@ -520,13 +525,14 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(3000));
 
-    xTaskCreate(
+    xTaskCreatePinnedToCore(
         history_download_task,
         "history_dl",
         8192,
         NULL,
         4,
-        &s_history_task
+        &s_history_task,
+        CORE_BLE
     );
 #else
     ESP_LOGI(TAG, "Starting periodic BLE reading...");
