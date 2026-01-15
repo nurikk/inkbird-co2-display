@@ -646,7 +646,11 @@ static void create_detail_screen(void)
     lv_obj_set_style_border_width(s_detail_chart, 0, 0);
     lv_obj_set_style_pad_all(s_detail_chart, 0, 0);
     lv_obj_set_style_line_width(s_detail_chart, CHART_LINE_WIDTH, LV_PART_ITEMS);
-    lv_obj_set_style_size(s_detail_chart, 0, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_width(s_detail_chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_detail_chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_detail_chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_line_opa(s_detail_chart, LV_OPA_TRANSP, LV_PART_CURSOR);
+    lv_obj_set_style_bg_opa(s_detail_chart, LV_OPA_TRANSP, LV_PART_CURSOR);
     lv_obj_set_style_line_color(s_detail_chart, lv_color_hex(COLOR_GRID_LINE), LV_PART_MAIN);
     lv_obj_set_style_line_opa(s_detail_chart, LV_OPA_COVER, LV_PART_MAIN);
     lv_chart_set_type(s_detail_chart, LV_CHART_TYPE_LINE);
@@ -659,6 +663,18 @@ static void create_detail_screen(void)
     s_detail_hum_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_HUMIDITY), LV_CHART_AXIS_PRIMARY_Y);
     s_detail_temp_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_TEMP), LV_CHART_AXIS_PRIMARY_Y);
     s_detail_co2_series = lv_chart_add_series(s_detail_chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
+
+    // Initialize detail chart data to hidden (no points drawn)
+    for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+        s_detail_co2_data[j] = LV_CHART_POINT_NONE;
+        s_detail_temp_data[j] = LV_CHART_POINT_NONE;
+        s_detail_hum_data[j] = LV_CHART_POINT_NONE;
+        s_detail_pres_data[j] = LV_CHART_POINT_NONE;
+    }
+    lv_chart_set_series_values(s_detail_chart, s_detail_co2_series, s_detail_co2_data, SENSOR_HISTORY_SIZE);
+    lv_chart_set_series_values(s_detail_chart, s_detail_temp_series, s_detail_temp_data, SENSOR_HISTORY_SIZE);
+    lv_chart_set_series_values(s_detail_chart, s_detail_hum_series, s_detail_hum_data, SENSOR_HISTORY_SIZE);
+    lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
 
     int chart_h = plot_bottom - plot_top;
     int y_div = chart_h / 4;
@@ -826,7 +842,11 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
     lv_obj_set_style_border_width(chart, 0, 0);
     lv_obj_set_style_pad_all(chart, TILE_CHART_PAD, 0);
     lv_obj_set_style_line_width(chart, CHART_LINE_WIDTH, LV_PART_ITEMS);
-    lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_width(chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_height(chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_line_opa(chart, LV_OPA_TRANSP, LV_PART_CURSOR);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_TRANSP, LV_PART_CURSOR);
     lv_obj_set_style_line_color(chart, lv_color_hex(TILE_CHART_GRID_COLOR), LV_PART_MAIN);
     lv_obj_set_style_line_opa(chart, LV_OPA_30, LV_PART_MAIN);
     lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
@@ -839,6 +859,13 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
     s_chart_series[index] = lv_chart_add_series(chart, lv_color_hex(COLOR_GOOD), LV_CHART_AXIS_PRIMARY_Y);
 
+    // Initialize chart data to hidden (no points drawn)
+    for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+        s_chart_data[index][j] = LV_CHART_POINT_NONE;
+    }
+    lv_chart_set_series_values(chart, s_chart_series[index], s_chart_data[index], SENSOR_HISTORY_SIZE);
+    lv_obj_add_flag(chart, LV_OBJ_FLAG_HIDDEN);
+
     lv_obj_t *chart_label = lv_label_create(tile);
     lv_obj_set_style_text_color(chart_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_12, 0);
@@ -849,9 +876,12 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
 static void create_ui(void)
 {
+    s_main_screen = lv_screen_active();
+
+    // Clean any existing objects (e.g., from loading screen)
+    lv_obj_clean(s_main_screen);
     s_loading_status_label = NULL;
 
-    s_main_screen = lv_screen_active();
     lv_obj_set_style_bg_color(s_main_screen, lv_color_hex(COLOR_BG_DARK), 0);
     lv_obj_set_style_bg_grad_dir(s_main_screen, LV_GRAD_DIR_NONE, 0);
     lv_obj_set_style_bg_opa(s_main_screen, LV_OPA_COVER, 0);
