@@ -207,6 +207,12 @@ When making code changes to this project:
 - **Be proactive**: The user expects the agent to complete the full workflow (edit → build → upload → monitor) in one go.
 - **Handle errors autonomously**: If upload fails, check common issues and retry. If build fails, fix the errors and try again.
 
+**VERY IMPORTANT - Serial Port Access:**
+- **NEVER** use `stty`, `cat /dev/cu.usb*`, `screen`, or any other direct serial port access commands
+- **ONLY** use `pio run -t mon` to read serial output from the device
+- Direct serial port access can cause device lockups, permission issues, and interfere with PlatformIO's serial handling
+- If `pio run -t mon` connects to the wrong port, the user will handle port configuration manually
+
 ## Troubleshooting Tools
 
 ### Device Photo Capture
