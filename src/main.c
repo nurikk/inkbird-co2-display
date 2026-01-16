@@ -53,8 +53,8 @@ static const char *TAG = "main";
 #define TOUCH_STATUS_LOG_INTERVAL_US 60000000 // 60s between touch status logs
 
 // Core affinity - separate display from BLE to avoid starvation
-#define CORE_BLE      0
-#define CORE_DISPLAY  1
+#define CORE_BLE      1
+#define CORE_DISPLAY  0
 
 // History download configuration
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display

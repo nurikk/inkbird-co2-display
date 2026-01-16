@@ -41,7 +41,7 @@ extern "C" {
 #define INVALID_HANDLE          0
 #define PROFILE_NUM             1
 #define PROFILE_APP_IDX         0
-#define BLE_TASK_CORE           0
+#define BLE_TASK_CORE           1
 #define MAX_PEERS               INKBIRD_SENSOR_COUNT
 #define INVALID_CONN_ID         0xFFFF
 
