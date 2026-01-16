@@ -211,8 +211,6 @@ static int s_y_label_positions[5];
 
 // Settings screen
 static lv_obj_t *s_settings_screen = NULL;
-static bool s_settings_loading = false;
-static lv_obj_t *s_settings_status_label = NULL;
 
 // Settings UI elements
 static lv_obj_t *s_settings_mode_label = NULL;
@@ -425,52 +423,15 @@ static void settings_btn_event_cb(lv_event_t *e)
         create_settings_screen();
     }
 
-    // Show loading state
-    s_settings_loading = true;
     update_settings_screen();
     lv_screen_load(s_settings_screen);
-
-    // Request settings from device (this will block briefly)
-    // After we show the screen, we'll trigger the actual request
     ESP_LOGI(TAG, "Opening settings for sensor %d", s_selected_sensor);
-}
-
-static void settings_refresh_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    if (s_selected_sensor < 0) return;
-
-    s_settings_loading = true;
-    update_settings_screen();
-
-    // Request settings in background
-    esp_err_t ret = inkbird_ble_request_settings(s_selected_sensor, 15000);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Settings synced successfully");
-    } else {
-        ESP_LOGW(TAG, "Failed to sync settings: %s", esp_err_to_name(ret));
-    }
-
-    s_settings_loading = false;
-    update_settings_screen();
 }
 
 static void update_settings_screen(void)
 {
     if (s_settings_screen == NULL || s_selected_sensor < 0) {
         return;
-    }
-
-    if (s_settings_loading) {
-        if (s_settings_status_label) {
-            lv_label_set_text(s_settings_status_label, "Loading settings...");
-            lv_obj_clear_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
-        }
-        return;
-    }
-
-    if (s_settings_status_label) {
-        lv_obj_add_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
     }
 
     inkbird_device_settings_t settings = inkbird_ble_get_settings(s_selected_sensor);
@@ -733,23 +694,6 @@ static void create_settings_screen(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_label_set_text(title, "Device Settings");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
-
-    // Refresh button
-    lv_obj_t *refresh_btn = lv_label_create(s_settings_screen);
-    lv_label_set_text(refresh_btn, "Sync");
-    lv_obj_set_style_text_color(refresh_btn, lv_color_hex(COLOR_ACCENT_BLUE), 0);
-    lv_obj_set_style_text_font(refresh_btn, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(refresh_btn, UI_DISPLAY_WIDTH - 50, 8);
-    lv_obj_add_flag(refresh_btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(refresh_btn, settings_refresh_btn_cb, LV_EVENT_CLICKED, NULL);
-
-    // Status label (shown while loading)
-    s_settings_status_label = lv_label_create(s_settings_screen);
-    lv_obj_set_style_text_color(s_settings_status_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(s_settings_status_label, &lv_font_montserrat_12, 0);
-    lv_label_set_text(s_settings_status_label, "Loading...");
-    lv_obj_align(s_settings_status_label, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(s_settings_status_label, LV_OBJ_FLAG_HIDDEN);
 
     int row_h = 20;
     int y1 = 32;  // Left column Y start

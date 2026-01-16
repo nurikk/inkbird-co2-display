@@ -452,6 +452,7 @@ void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "[Stage 3] BLE initialized");
+    ESP_LOGI(TAG, "Free heap after BLE: %lu bytes", esp_get_free_heap_size());
 
     // Now it's safe to start display task after BLE controller is running
     ESP_LOGI(TAG, "Starting display task on core %d...", CORE_DISPLAY);
@@ -496,6 +497,26 @@ void app_main(void)
         s_do_refresh = true;
         read_initial_sensor_value(i);
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // ========== PHASE 1.5: Load device settings ==========
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  Phase 1.5: Loading Device Settings");
+    ESP_LOGI(TAG, "========================================");
+    for (int i = 0; i < active_count; i++) {
+        char status_buf[32];
+        snprintf(status_buf, sizeof(status_buf), "Loading settings %d/%d...", i + 1, active_count);
+        sensor_data_set_status(i, status_buf);
+        s_do_refresh = true;
+
+        esp_err_t ret = inkbird_ble_request_settings(i, 10000);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Sensor %d settings loaded", i);
+        } else {
+            ESP_LOGW(TAG, "Sensor %d settings failed: %s", i, esp_err_to_name(ret));
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     // ========== PHASE 2: Set up display timers ==========
