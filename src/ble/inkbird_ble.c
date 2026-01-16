@@ -88,7 +88,11 @@ uint16_t s_conn_id = 0;
 uint8_t s_current_sensor_index = 0;
 esp_gatt_if_t s_gattc_if = ESP_GATT_IF_NONE;
 
-// GATT handles
+// Peer management (multi-connection)
+inkbird_peer_t s_peers[MAX_PEERS];
+uint8_t s_peer_count = 0;
+
+// GATT handles (legacy - kept for history/settings compatibility)
 uint16_t s_service_start_handle = 0;
 uint16_t s_service_end_handle = 0;
 uint16_t s_data_char_handle = 0;
@@ -125,6 +129,89 @@ uint16_t s_history_write_idx = 0;
 bool s_history_buffer_wrapped = false;
 
 // ============================================================================
+// Peer Manager Functions
+// ============================================================================
+
+inkbird_peer_t *peer_find_by_conn_id(uint16_t conn_id)
+{
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].conn_id == conn_id) {
+            return &s_peers[i];
+        }
+    }
+    return NULL;
+}
+
+inkbird_peer_t *peer_find_by_mac(const esp_bd_addr_t bda)
+{
+    for (int i = 0; i < s_peer_count; i++) {
+        if (memcmp(s_peers[i].remote_bda, bda, 6) == 0) {
+            return &s_peers[i];
+        }
+    }
+    return NULL;
+}
+
+inkbird_peer_t *peer_add(uint8_t sensor_idx)
+{
+    if (s_peer_count >= MAX_PEERS) {
+        ESP_LOGW(TAG, "Peer list full, cannot add sensor %d", sensor_idx);
+        return NULL;
+    }
+
+    inkbird_peer_t *peer = &s_peers[s_peer_count++];
+    memset(peer, 0, sizeof(*peer));
+    peer->sensor_idx = sensor_idx;
+    peer->conn_id = INVALID_CONN_ID;
+    memcpy(peer->remote_bda, s_active_sensors[sensor_idx].mac, 6);
+
+    ESP_LOGI(TAG, "Added peer %d for sensor %d (%s)",
+             s_peer_count - 1, sensor_idx, s_active_sensors[sensor_idx].name);
+    return peer;
+}
+
+void peer_remove(inkbird_peer_t *peer)
+{
+    if (peer == NULL) return;
+
+    int idx = peer - s_peers;
+    if (idx < 0 || idx >= s_peer_count) return;
+
+    ESP_LOGI(TAG, "Removing peer %d (sensor %d)", idx, peer->sensor_idx);
+
+    if (idx < s_peer_count - 1) {
+        memmove(&s_peers[idx], &s_peers[idx + 1],
+                (s_peer_count - idx - 1) * sizeof(inkbird_peer_t));
+    }
+    s_peer_count--;
+}
+
+void peer_reset(inkbird_peer_t *peer)
+{
+    if (peer == NULL) return;
+
+    uint8_t sensor_idx = peer->sensor_idx;
+    esp_bd_addr_t bda;
+    memcpy(bda, peer->remote_bda, 6);
+
+    memset(peer, 0, sizeof(*peer));
+    peer->sensor_idx = sensor_idx;
+    peer->conn_id = INVALID_CONN_ID;
+    memcpy(peer->remote_bda, bda, 6);
+}
+
+uint8_t peer_count_connected(void)
+{
+    uint8_t count = 0;
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// ============================================================================
 // Public API - Initialization
 // ============================================================================
 
@@ -150,6 +237,10 @@ esp_err_t inkbird_ble_init(void)
     memset(s_thresholds, 0, sizeof(s_thresholds));
     memset(s_failure_count, 0, sizeof(s_failure_count));
     memset(s_skip_cycles, 0, sizeof(s_skip_cycles));
+
+    // Initialize peer array
+    memset(s_peers, 0, sizeof(s_peers));
+    s_peer_count = 0;
 
     // Initialize active sensors registry
     memset(s_active_sensors, 0, sizeof(s_active_sensors));
@@ -384,41 +475,53 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
     ESP_LOGI(TAG, "One-shot read: sensor %d (%s), timeout %lu ms",
              sensor_idx, s_active_sensors[sensor_idx].name, timeout_ms);
 
-    // Close any existing connection
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        ESP_LOGW(TAG, "Closing existing connection before new read");
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    // Close any existing connections and clear peer list
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
+            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        }
     }
+    if (s_peer_count > 0) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    s_peer_count = 0;
 
     // Drain stale semaphore signals
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
-    // Set up for this sensor
+    // Create a peer for this sensor
+    inkbird_peer_t *peer = peer_add(sensor_idx);
+    if (peer == NULL) {
+        ESP_LOGE(TAG, "Failed to create peer for sensor %d", sensor_idx);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Set legacy globals for compatibility
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;
     memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
-             s_target_bda[0], s_target_bda[1], s_target_bda[2],
-             s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+             peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
+             peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
 
     // Open connection
     esp_err_t ret = esp_ble_gattc_open(
-        s_gattc_if, s_target_bda,
+        s_gattc_if, peer->remote_bda,
         BLE_ADDR_TYPE_PUBLIC, true);
 
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "GATTC open failed with public addr: %s, trying random",
                  esp_err_to_name(ret));
         ret = esp_ble_gattc_open(
-            s_gattc_if, s_target_bda,
+            s_gattc_if, peer->remote_bda,
             BLE_ADDR_TYPE_RANDOM, true);
     }
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initiate connection: %s", esp_err_to_name(ret));
+        s_peer_count = 0;  // Clean up peer
         return ret;
     }
 
@@ -427,7 +530,10 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
                                          pdMS_TO_TICKS(timeout_ms));
 
     esp_err_t result;
-    if (got_sem == pdTRUE && s_data_received) {
+    // Check peer data_received flag (more reliable than legacy s_data_received)
+    bool data_ok = (got_sem == pdTRUE && peer != NULL && peer->data_received);
+
+    if (data_ok) {
         ESP_LOGI(TAG, "One-shot read successful for sensor %d", sensor_idx);
 
         if (out_reading != NULL) {
@@ -441,15 +547,18 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         result = ESP_ERR_TIMEOUT;
     }
 
-    // Disconnect
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    // Disconnect using peer state
+    if (peer != NULL && peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         vTaskDelay(pdMS_TO_TICKS(1000));
-    } else if (s_gattc_if != ESP_GATT_IF_NONE) {
+    } else if (peer != NULL && s_gattc_if != ESP_GATT_IF_NONE) {
         ESP_LOGW(TAG, "Cancelling pending connection to clean up BLE state");
-        esp_ble_gap_disconnect(s_target_bda);
+        esp_ble_gap_disconnect(peer->remote_bda);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+
+    // Clean up peer
+    s_peer_count = 0;
     s_connected = false;
 
     return result;

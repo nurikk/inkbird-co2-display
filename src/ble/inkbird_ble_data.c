@@ -48,33 +48,29 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         // Parse pairing response (cmd 0x08) per protocol section 7.2
         if (cmd_id == 0x08 && len >= 5) {
             uint8_t status = data[4];
-            ESP_LOGI(TAG, "Pairing response: %s (0x%02X)",
+            ESP_LOGI(TAG, "Pairing response: %s (0x%02X) for sensor %d",
                      status == 0x00 ? "ready" : status == 0x02 ? "success" : "unknown",
-                     status);
+                     status, sensor_idx);
+
+            // Find the peer for this sensor to get the correct handles
+            inkbird_peer_t *peer = NULL;
+            for (int i = 0; i < s_peer_count; i++) {
+                if (s_peers[i].sensor_idx == sensor_idx && s_peers[i].connected) {
+                    peer = &s_peers[i];
+                    break;
+                }
+            }
 
             // After pairing, send settings/data requests
-            if ((status == 0x00 || status == 0x02) && s_cmd_char_handle != 0 &&
+            if ((status == 0x00 || status == 0x02) && peer != NULL &&
+                peer->cmd_char_handle != 0 &&
                 s_history_state == INKBIRD_HISTORY_IDLE && !s_settings_request_mode) {
                 sensor_data_set_status(sensor_idx, "Requesting...");
 
-                // Send CO2 settings request (0x02)
-                ESP_LOGI(TAG, "Sending CO2 settings request...");
-                esp_ble_gattc_write_char(
-                    s_gattc_if, s_conn_id, s_cmd_char_handle,
-                    sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
-                    ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-                // Send CO2 thresholds request (0x03)
-                ESP_LOGI(TAG, "Sending CO2 thresholds request...");
-                esp_ble_gattc_write_char(
-                    s_gattc_if, s_conn_id, s_cmd_char_handle,
-                    sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
-                    ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-
-                // Send real-time data request (0x09)
+                // Send real-time data request (0x09) first - this is what we need
                 ESP_LOGI(TAG, "Sending real-time data request...");
                 esp_ble_gattc_write_char(
-                    s_gattc_if, s_conn_id, s_cmd_char_handle,
+                    s_gattc_if, peer->conn_id, peer->cmd_char_handle,
                     sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
                     ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
             }
@@ -230,15 +226,17 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
 }
 
 // ============================================================================
-// Read Task
+// Read Task (Sequential with Peer Management)
 // ============================================================================
 
 void inkbird_read_task(void *arg)
 {
-    ESP_LOGI(TAG, "Read task started");
+    ESP_LOGI(TAG, "Read task started (sequential mode with peer management)");
 
     while (s_running) {
-        // Round-robin through all active sensors
+        ESP_LOGI(TAG, "=== Starting read cycle for %d sensors ===", s_active_sensor_count);
+
+        // Process each sensor sequentially to avoid BLE memory exhaustion
         for (int i = 0; i < s_active_sensor_count && s_running; i++) {
             // Skip if sensor not enabled
             if (!s_active_sensors[i].enabled) {
@@ -252,31 +250,37 @@ void inkbird_read_task(void *arg)
                 continue;
             }
 
-            ESP_LOGI(TAG, "Reading sensor %d: %s", i, s_active_sensors[i].name);
-            s_current_sensor_index = i;
-            s_data_received = false;
+            // Clear peer list and create a single peer for this sensor
+            s_peer_count = 0;
+            inkbird_peer_t *peer = peer_add(i);
+            if (peer == NULL) {
+                ESP_LOGE(TAG, "Failed to create peer for sensor %d", i);
+                continue;
+            }
 
-            // Copy target MAC address
-            memcpy(s_target_bda, s_active_sensors[i].mac, 6);
+            // Drain stale semaphore signals
+            while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
-            ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
-                     s_target_bda[0], s_target_bda[1], s_target_bda[2],
-                     s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+            ESP_LOGI(TAG, "Connecting to sensor %d (%s): %02X:%02X:%02X:%02X:%02X:%02X",
+                     peer->sensor_idx, s_active_sensors[peer->sensor_idx].name,
+                     peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
+                     peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
 
             // Open connection
             esp_err_t ret = esp_ble_gattc_open(
-                s_gattc_if, s_target_bda,
+                s_gattc_if, peer->remote_bda,
                 BLE_ADDR_TYPE_PUBLIC, true);
 
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "GATTC open failed: %s, trying random addr", esp_err_to_name(ret));
                 ret = esp_ble_gattc_open(
-                    s_gattc_if, s_target_bda,
+                    s_gattc_if, peer->remote_bda,
                     BLE_ADDR_TYPE_RANDOM, true);
             }
 
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to connect to sensor %d: %s", i, esp_err_to_name(ret));
+                ESP_LOGE(TAG, "Failed to initiate connection to sensor %d: %s",
+                         peer->sensor_idx, esp_err_to_name(ret));
                 s_failure_count[i]++;
 
                 if (s_failure_count[i] >= INKBIRD_MAX_FAILURES) {
@@ -292,11 +296,12 @@ void inkbird_read_task(void *arg)
             BaseType_t got_data = xSemaphoreTake(s_read_complete_sem,
                                                   pdMS_TO_TICKS(INKBIRD_CONNECT_TIMEOUT_MS));
 
-            if (got_data == pdTRUE && s_data_received) {
-                ESP_LOGI(TAG, "Successfully read sensor %d", i);
+            // Check result
+            if (got_data == pdTRUE && peer->data_received) {
+                ESP_LOGI(TAG, "  Sensor %d (%s): OK", i, s_active_sensors[i].name);
                 s_failure_count[i] = 0;
             } else {
-                ESP_LOGW(TAG, "Timeout or no data from sensor %d", i);
+                ESP_LOGW(TAG, "  Sensor %d (%s): No data (timeout)", i, s_active_sensors[i].name);
                 s_failure_count[i]++;
 
                 if (s_failure_count[i] >= INKBIRD_MAX_FAILURES) {
@@ -307,20 +312,21 @@ void inkbird_read_task(void *arg)
                 }
             }
 
-            // Disconnect/cancel any pending connection
-            if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-                esp_ble_gattc_close(s_gattc_if, s_conn_id);
+            // Disconnect
+            if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
+                esp_ble_gattc_close(s_gattc_if, peer->conn_id);
                 vTaskDelay(pdMS_TO_TICKS(500));
             } else if (s_gattc_if != ESP_GATT_IF_NONE) {
-                // Cancel pending connection
-                esp_ble_gap_disconnect(s_target_bda);
+                esp_ble_gap_disconnect(peer->remote_bda);
                 vTaskDelay(pdMS_TO_TICKS(300));
             }
-            s_connected = false;
 
-            // Delay between sensors
+            // Small delay between sensors
             vTaskDelay(pdMS_TO_TICKS(INKBIRD_INTER_SENSOR_DELAY_MS));
         }
+
+        // Clear peer list after cycle
+        s_peer_count = 0;
 
         // Wait until next read cycle
         if (s_running) {
@@ -330,6 +336,8 @@ void inkbird_read_task(void *arg)
         }
     }
 
+    // Cleanup
+    s_peer_count = 0;
     ESP_LOGI(TAG, "Read task exiting");
     vTaskDelete(NULL);
 }

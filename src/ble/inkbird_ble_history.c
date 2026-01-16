@@ -314,7 +314,7 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Connection failed: %s", esp_err_to_name(ret));
-        s_history_state = INKBIRD_HISTORY_ERROR;
+        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
         return ret;
     }
 
@@ -322,13 +322,13 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(30000));
     if (got_sem != pdTRUE || !s_connected) {
         ESP_LOGE(TAG, "Connection timeout or failed");
-        s_history_state = INKBIRD_HISTORY_ERROR;
         if (s_connected) {
             esp_ble_gattc_close(s_gattc_if, s_conn_id);
         } else {
             esp_ble_gap_disconnect(s_target_bda);
             vTaskDelay(pdMS_TO_TICKS(500));
         }
+        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
         return ESP_ERR_TIMEOUT;
     }
 
@@ -341,8 +341,8 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     ret = inkbird_send_history_command(CMD_HISTORY_START, sizeof(CMD_HISTORY_START));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send history command");
-        s_history_state = INKBIRD_HISTORY_ERROR;
         esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
         return ret;
     }
 

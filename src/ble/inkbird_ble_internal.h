@@ -42,6 +42,32 @@ extern "C" {
 #define PROFILE_NUM             1
 #define PROFILE_APP_IDX         0
 #define BLE_TASK_CORE           0
+#define MAX_PEERS               INKBIRD_SENSOR_COUNT
+#define INVALID_CONN_ID         0xFFFF
+
+// ============================================================================
+// Per-Connection State (Peer)
+// ============================================================================
+
+typedef struct {
+    uint8_t sensor_idx;               // Index into s_active_sensors[]
+    esp_bd_addr_t remote_bda;         // Device MAC address
+    uint16_t conn_id;                 // Connection ID from stack
+    bool connected;                   // Connection established
+    bool ready;                       // Notifications enabled, ready for data
+
+    // GATT handles (discovered per-connection)
+    uint16_t service_start_handle;
+    uint16_t service_end_handle;
+    uint16_t data_char_handle;        // FFE4 - notifications
+    uint16_t cmd_char_handle;         // FFE9 - commands
+    uint16_t cccd_handle;
+
+    // Data reception
+    bool data_received;
+    uint8_t recv_data[32];
+    size_t recv_len;
+} inkbird_peer_t;
 
 // Inkbird service and characteristic UUIDs (16-bit)
 #define INKBIRD_SVC_UUID16      0xFFE0
@@ -119,12 +145,16 @@ extern uint8_t s_discovered_count;
 extern bool s_ble_initialized;
 extern bool s_running;
 extern bool s_scanning;
-extern bool s_connected;
-extern uint16_t s_conn_id;
+extern bool s_connected;              // Legacy: any connection active
+extern uint16_t s_conn_id;            // Legacy: for single-connection compat
 extern uint8_t s_current_sensor_index;
 extern esp_gatt_if_t s_gattc_if;
 
-// GATT handles
+// Peer management (multi-connection)
+extern inkbird_peer_t s_peers[MAX_PEERS];
+extern uint8_t s_peer_count;
+
+// GATT handles (legacy - kept for history/settings compatibility)
 extern uint16_t s_service_start_handle;
 extern uint16_t s_service_end_handle;
 extern uint16_t s_data_char_handle;
@@ -163,6 +193,14 @@ extern bool s_history_buffer_wrapped;
 // ============================================================================
 // Internal Function Declarations
 // ============================================================================
+
+// Peer management (inkbird_ble.c)
+inkbird_peer_t *peer_find_by_conn_id(uint16_t conn_id);
+inkbird_peer_t *peer_find_by_mac(const esp_bd_addr_t bda);
+inkbird_peer_t *peer_add(uint8_t sensor_idx);
+void peer_remove(inkbird_peer_t *peer);
+void peer_reset(inkbird_peer_t *peer);
+uint8_t peer_count_connected(void);
 
 // Protocol handlers (inkbird_ble_protocol.c)
 void inkbird_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
