@@ -1,6 +1,6 @@
 /**
  * @file inkbird_ble_internal.h
- * @brief Internal shared state and declarations for Inkbird BLE modules
+ * @brief Internal shared state and declarations for Inkbird BLE modules (NimBLE)
  *
  * This header is used internally by the inkbird_ble_* modules to share
  * state variables, constants, and forward declarations. Not intended for
@@ -20,10 +20,19 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
-#include "esp_bt.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gattc_api.h"
-#include "esp_bt_main.h"
+
+// NimBLE includes
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/util/util.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+
+// NimBLE store config (provided by ESP-IDF)
+void ble_store_config_init(void);
 
 #include "inkbird_ble.h"
 #include "inkbird_config.h"
@@ -37,13 +46,10 @@ extern "C" {
 // Constants
 // ============================================================================
 
-#define GATTC_APP_ID            0
 #define INVALID_HANDLE          0
-#define PROFILE_NUM             1
-#define PROFILE_APP_IDX         0
 #define BLE_TASK_CORE           1
 #define MAX_PEERS               INKBIRD_SENSOR_COUNT
-#define INVALID_CONN_ID         0xFFFF
+#define INVALID_CONN_HANDLE     0xFFFF
 
 // ============================================================================
 // Per-Connection State (Peer)
@@ -51,8 +57,8 @@ extern "C" {
 
 typedef struct {
     uint8_t sensor_idx;               // Index into s_active_sensors[]
-    esp_bd_addr_t remote_bda;         // Device MAC address
-    uint16_t conn_id;                 // Connection ID from stack
+    ble_addr_t remote_addr;           // Device BLE address
+    uint16_t conn_handle;             // Connection handle from stack
     bool connected;                   // Connection established
     bool ready;                       // Notifications enabled, ready for data
 
@@ -60,7 +66,9 @@ typedef struct {
     uint16_t service_start_handle;
     uint16_t service_end_handle;
     uint16_t data_char_handle;        // FFE4 - notifications
+    uint16_t data_char_val_handle;    // FFE4 value handle
     uint16_t cmd_char_handle;         // FFE9 - commands
+    uint16_t cmd_char_val_handle;     // FFE9 value handle
     uint16_t cccd_handle;
 
     // Data reception
@@ -75,7 +83,7 @@ typedef struct {
 #define INKBIRD_CMD_UUID16      0xFFE9  // Write commands
 
 // CCCD UUID for enabling notifications
-#define ESP_GATT_UUID_CHAR_CLIENT_CONFIG 0x2902
+#define BLE_GATT_DSC_CLT_CFG_UUID16 0x2902
 
 // History end marker
 #define HISTORY_END_MARKER_HIGH 0x66
@@ -143,12 +151,13 @@ extern uint8_t s_discovered_count;
 
 // BLE state
 extern bool s_ble_initialized;
+extern bool s_ble_synced;
 extern bool s_running;
 extern bool s_scanning;
 extern bool s_connected;              // Legacy: any connection active
-extern uint16_t s_conn_id;            // Legacy: for single-connection compat
+extern uint16_t s_conn_handle;        // Legacy: for single-connection compat
 extern uint8_t s_current_sensor_index;
-extern esp_gatt_if_t s_gattc_if;
+extern uint8_t s_own_addr_type;
 
 // Peer management (multi-connection)
 extern inkbird_peer_t s_peers[MAX_PEERS];
@@ -174,7 +183,7 @@ extern size_t s_recv_len;
 extern bool s_data_received;
 
 // Target address
-extern esp_bd_addr_t s_target_bda;
+extern ble_addr_t s_target_addr;
 
 // History download state
 extern inkbird_history_state_t s_history_state;
@@ -198,16 +207,46 @@ extern uint16_t s_history_downsample_counter;  // Counter for downsampling
 // ============================================================================
 
 // Peer management (inkbird_ble.c)
-inkbird_peer_t *peer_find_by_conn_id(uint16_t conn_id);
-inkbird_peer_t *peer_find_by_mac(const esp_bd_addr_t bda);
+inkbird_peer_t *peer_find_by_conn_handle(uint16_t conn_handle);
+inkbird_peer_t *peer_find_by_addr(const ble_addr_t *addr);
 inkbird_peer_t *peer_add(uint8_t sensor_idx);
 void peer_remove(inkbird_peer_t *peer);
 void peer_reset(inkbird_peer_t *peer);
 uint8_t peer_count_connected(void);
 
-// Protocol handlers (inkbird_ble_protocol.c)
-void inkbird_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
-void inkbird_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
+// NimBLE host task
+void inkbird_nimble_host_task(void *param);
+
+// GAP event handler (inkbird_ble_protocol.c)
+int inkbird_gap_event_handler(struct ble_gap_event *event, void *arg);
+
+// GATT callbacks (inkbird_ble_protocol.c)
+int inkbird_on_disc_complete(uint16_t conn_handle,
+                              const struct ble_gatt_error *error,
+                              const struct ble_gatt_svc *service,
+                              void *arg);
+int inkbird_on_chr_disc(uint16_t conn_handle,
+                         const struct ble_gatt_error *error,
+                         const struct ble_gatt_chr *chr,
+                         void *arg);
+int inkbird_on_dsc_disc(uint16_t conn_handle,
+                         const struct ble_gatt_error *error,
+                         uint16_t chr_val_handle,
+                         const struct ble_gatt_dsc *dsc,
+                         void *arg);
+int inkbird_on_subscribe(uint16_t conn_handle,
+                          const struct ble_gatt_error *error,
+                          struct ble_gatt_attr *attr,
+                          void *arg);
+int inkbird_on_write(uint16_t conn_handle,
+                      const struct ble_gatt_error *error,
+                      struct ble_gatt_attr *attr,
+                      void *arg);
+
+// Connection management (inkbird_ble_protocol.c)
+void inkbird_start_connect(inkbird_peer_t *peer);
+void inkbird_start_scan(void);
+void inkbird_stop_scan(void);
 
 // Data parsing (inkbird_ble_data.c)
 bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx);

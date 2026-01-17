@@ -1,9 +1,9 @@
 /**
  * @file inkbird_ble.c
- * @brief Core BLE module for Inkbird IAM-T1 CO2 sensors
+ * @brief Core BLE module for Inkbird IAM-T1 CO2 sensors (NimBLE stack)
  *
  * This is the main entry point for the Inkbird BLE module. It provides:
- * - BLE stack initialization and configuration
+ * - NimBLE stack initialization and configuration
  * - Shared state variable definitions
  * - Public API wrappers for initialization, start/stop, and sensor access
  *
@@ -27,11 +27,6 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "soc/rtc_cntl_reg.h"
-#include "esp_bt.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gattc_api.h"
-#include "esp_bt_main.h"
-#include "esp_gatt_common_api.h"
 #include "nvs_flash.h"
 
 #include "inkbird_ble.h"
@@ -81,12 +76,13 @@ uint8_t s_discovered_count = 0;
 
 // BLE state
 bool s_ble_initialized = false;
+bool s_ble_synced = false;
 bool s_running = false;
 bool s_scanning = false;
 bool s_connected = false;
-uint16_t s_conn_id = 0;
+uint16_t s_conn_handle = INVALID_CONN_HANDLE;
 uint8_t s_current_sensor_index = 0;
-esp_gatt_if_t s_gattc_if = ESP_GATT_IF_NONE;
+uint8_t s_own_addr_type = 0;
 
 // Peer management (multi-connection)
 inkbird_peer_t s_peers[MAX_PEERS];
@@ -112,7 +108,7 @@ size_t s_recv_len = 0;
 bool s_data_received = false;
 
 // Target address
-esp_bd_addr_t s_target_bda;
+ble_addr_t s_target_addr;
 
 // History download state
 inkbird_history_state_t s_history_state = INKBIRD_HISTORY_IDLE;
@@ -128,27 +124,70 @@ SemaphoreHandle_t s_history_complete_sem = NULL;
 uint16_t s_history_write_idx = 0;
 bool s_history_buffer_wrapped = false;
 bool s_history_setup_mode = false;
-uint8_t s_history_downsample_rate = 1;  // Sample every Nth record (1=no downsampling)
-uint16_t s_history_downsample_counter = 0;  // Counter for downsampling
+uint8_t s_history_downsample_rate = 1;
+uint16_t s_history_downsample_counter = 0;
+
+// ============================================================================
+// NimBLE Callbacks
+// ============================================================================
+
+static void inkbird_on_reset(int reason)
+{
+    ESP_LOGE(TAG, "NimBLE host reset, reason=%d", reason);
+}
+
+static void inkbird_on_sync(void)
+{
+    int rc;
+
+    ESP_LOGI(TAG, "NimBLE host synced");
+
+    // Determine best address type
+    rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to ensure address: %d", rc);
+        return;
+    }
+
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to infer address type: %d", rc);
+        return;
+    }
+
+    uint8_t addr[6];
+    ble_hs_id_copy_addr(s_own_addr_type, addr, NULL);
+    ESP_LOGI(TAG, "Device address: %02X:%02X:%02X:%02X:%02X:%02X (type=%d)",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], s_own_addr_type);
+
+    s_ble_synced = true;
+}
+
+void inkbird_nimble_host_task(void *param)
+{
+    ESP_LOGI(TAG, "NimBLE host task started");
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
 
 // ============================================================================
 // Peer Manager Functions
 // ============================================================================
 
-inkbird_peer_t *peer_find_by_conn_id(uint16_t conn_id)
+inkbird_peer_t *peer_find_by_conn_handle(uint16_t conn_handle)
 {
     for (int i = 0; i < s_peer_count; i++) {
-        if (s_peers[i].conn_id == conn_id) {
+        if (s_peers[i].conn_handle == conn_handle) {
             return &s_peers[i];
         }
     }
     return NULL;
 }
 
-inkbird_peer_t *peer_find_by_mac(const esp_bd_addr_t bda)
+inkbird_peer_t *peer_find_by_addr(const ble_addr_t *addr)
 {
     for (int i = 0; i < s_peer_count; i++) {
-        if (memcmp(s_peers[i].remote_bda, bda, 6) == 0) {
+        if (memcmp(&s_peers[i].remote_addr, addr, sizeof(ble_addr_t)) == 0) {
             return &s_peers[i];
         }
     }
@@ -165,8 +204,15 @@ inkbird_peer_t *peer_add(uint8_t sensor_idx)
     inkbird_peer_t *peer = &s_peers[s_peer_count++];
     memset(peer, 0, sizeof(*peer));
     peer->sensor_idx = sensor_idx;
-    peer->conn_id = INVALID_CONN_ID;
-    memcpy(peer->remote_bda, s_active_sensors[sensor_idx].mac, 6);
+    peer->conn_handle = INVALID_CONN_HANDLE;
+
+    // Copy MAC address with byte reversal
+    // Config stores MACs in big-endian (human-readable: AA:BB:CC:DD:EE:FF = {0xAA,0xBB,...})
+    // NimBLE uses little-endian in ble_addr_t.val (val[0]=LSB)
+    peer->remote_addr.type = BLE_ADDR_PUBLIC;
+    for (int i = 0; i < 6; i++) {
+        peer->remote_addr.val[i] = s_active_sensors[sensor_idx].mac[5 - i];
+    }
 
     ESP_LOGI(TAG, "Added peer %d for sensor %d (%s)",
              s_peer_count - 1, sensor_idx, s_active_sensors[sensor_idx].name);
@@ -194,13 +240,13 @@ void peer_reset(inkbird_peer_t *peer)
     if (peer == NULL) return;
 
     uint8_t sensor_idx = peer->sensor_idx;
-    esp_bd_addr_t bda;
-    memcpy(bda, peer->remote_bda, 6);
+    ble_addr_t addr;
+    memcpy(&addr, &peer->remote_addr, sizeof(addr));
 
     memset(peer, 0, sizeof(*peer));
     peer->sensor_idx = sensor_idx;
-    peer->conn_id = INVALID_CONN_ID;
-    memcpy(peer->remote_bda, bda, 6);
+    peer->conn_handle = INVALID_CONN_HANDLE;
+    memcpy(&peer->remote_addr, &addr, sizeof(addr));
 }
 
 uint8_t peer_count_connected(void)
@@ -225,7 +271,7 @@ esp_err_t inkbird_ble_init(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Initializing BLE (Bluedroid stack) for Inkbird sensors...");
+    ESP_LOGI(TAG, "Initializing BLE (NimBLE stack) for Inkbird sensors...");
 
     // Initialize NVS (required for BLE)
     esp_err_t ret = nvs_flash_init();
@@ -282,69 +328,51 @@ esp_err_t inkbird_ble_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    // Release BT classic memory
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
-
     // Disable brownout detector during RF calibration
     ESP_LOGI(TAG, "Free heap before BLE: %lu bytes", esp_get_free_heap_size());
     ESP_LOGW(TAG, "Disabling brownout detector for RF calibration...");
     WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Initialize BT controller
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
+    // Initialize NimBLE port
+    ret = nimble_port_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init BT controller: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to init NimBLE port: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable BT controller: %s", esp_err_to_name(ret));
-        return ret;
+    // Configure NimBLE host
+    ble_hs_cfg.reset_cb = inkbird_on_reset;
+    ble_hs_cfg.sync_cb = inkbird_on_sync;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+    // Initialize GAP and GATT services
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    // Set device name
+    ble_svc_gap_device_name_set("CO2Display");
+
+    // Initialize NimBLE host configuration store
+    ble_store_config_init();
+
+    // Start NimBLE host task
+    nimble_port_freertos_init(inkbird_nimble_host_task);
+
+    // Wait for host to sync
+    int timeout = 50;  // 5 seconds
+    while (!s_ble_synced && timeout > 0) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        timeout--;
     }
 
-    // Initialize Bluedroid
-    ret = esp_bluedroid_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init Bluedroid: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_bluedroid_enable();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable Bluedroid: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Register callbacks (implemented in inkbird_ble_protocol.c)
-    ret = esp_ble_gap_register_callback(inkbird_gap_event_handler);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register GAP callback: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_ble_gattc_register_callback(inkbird_gattc_event_handler);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register GATTC callback: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_ble_gattc_app_register(GATTC_APP_ID);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register GATTC app: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Set MTU
-    ret = esp_ble_gatt_set_local_mtu(247);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to set local MTU: %s", esp_err_to_name(ret));
+    if (!s_ble_synced) {
+        ESP_LOGE(TAG, "NimBLE host failed to sync");
+        return ESP_FAIL;
     }
 
     s_ble_initialized = true;
-    ESP_LOGI(TAG, "BLE initialized successfully (Bluedroid stack)");
+    ESP_LOGI(TAG, "BLE initialized successfully (NimBLE stack)");
 
     return ESP_OK;
 }
@@ -411,9 +439,11 @@ esp_err_t inkbird_ble_stop(void)
         s_read_task_handle = NULL;
     }
 
-    // Disconnect if connected
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    // Disconnect all peers
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
     }
 
     ESP_LOGI(TAG, "BLE reading stopped");
@@ -465,6 +495,11 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (!s_ble_synced) {
+        ESP_LOGE(TAG, "BLE not synced");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (sensor_idx >= s_active_sensor_count) {
         ESP_LOGE(TAG, "Invalid sensor index: %d (active count: %d)", sensor_idx, s_active_sensor_count);
         return ESP_ERR_INVALID_ARG;
@@ -480,8 +515,8 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
 
     // Close any existing connections and clear peer list
     for (int i = 0; i < s_peer_count; i++) {
-        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
-            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
     }
     if (s_peer_count > 0) {
@@ -503,37 +538,21 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;
-    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+    memcpy(&s_target_addr, &peer->remote_addr, sizeof(s_target_addr));
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X",
-             peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
-             peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
+             peer->remote_addr.val[5], peer->remote_addr.val[4], peer->remote_addr.val[3],
+             peer->remote_addr.val[2], peer->remote_addr.val[1], peer->remote_addr.val[0]);
 
-    // Open connection
-    esp_err_t ret = esp_ble_gattc_open(
-        s_gattc_if, peer->remote_bda,
-        BLE_ADDR_TYPE_PUBLIC, true);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "GATTC open failed with public addr: %s, trying random",
-                 esp_err_to_name(ret));
-        ret = esp_ble_gattc_open(
-            s_gattc_if, peer->remote_bda,
-            BLE_ADDR_TYPE_RANDOM, true);
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initiate connection: %s", esp_err_to_name(ret));
-        s_peer_count = 0;  // Clean up peer
-        return ret;
-    }
+    // Start connection
+    inkbird_start_connect(peer);
 
     // Wait for data or timeout
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem,
                                          pdMS_TO_TICKS(timeout_ms));
 
     esp_err_t result;
-    // Check peer data_received flag (more reliable than legacy s_data_received)
+    // Check peer data_received flag
     bool data_ok = (got_sem == pdTRUE && peer != NULL && peer->data_received);
 
     if (data_ok) {
@@ -550,14 +569,10 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         result = ESP_ERR_TIMEOUT;
     }
 
-    // Disconnect using peer state
-    if (peer != NULL && peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+    // Disconnect
+    if (peer != NULL && peer->connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+        ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         vTaskDelay(pdMS_TO_TICKS(1000));
-    } else if (peer != NULL && s_gattc_if != ESP_GATT_IF_NONE) {
-        ESP_LOGW(TAG, "Cancelling pending connection to clean up BLE state");
-        esp_ble_gap_disconnect(peer->remote_bda);
-        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     // Clean up peer
@@ -578,6 +593,11 @@ esp_err_t inkbird_ble_discover(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (!s_ble_synced) {
+        ESP_LOGE(TAG, "BLE not synced");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  Starting Inkbird Sensor Discovery");
@@ -591,26 +611,13 @@ esp_err_t inkbird_ble_discover(void)
     memset(s_discovered, 0, sizeof(s_discovered));
 
     // Start scanning
-    esp_ble_scan_params_t scan_params = {
-        .scan_type = BLE_SCAN_TYPE_ACTIVE,
-        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval = 0x50,
-        .scan_window = 0x30,
-        .scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE
-    };
-
-    esp_err_t ret = esp_ble_gap_set_scan_params(&scan_params);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set scan params: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    inkbird_start_scan();
 
     s_scanning = true;
     vTaskDelay(pdMS_TO_TICKS((INKBIRD_SCAN_DURATION_SEC + 2) * 1000));
     s_scanning = false;
 
-    esp_ble_gap_stop_scanning();
+    inkbird_stop_scan();
 
     // Log results
     ESP_LOGI(TAG, "");
@@ -667,19 +674,30 @@ void inkbird_ble_register_discovered(void)
     for (int i = 0; i < s_discovered_count && s_active_sensor_count < INKBIRD_SENSOR_COUNT; i++) {
         bool already_known = false;
         for (int j = 0; j < s_active_sensor_count; j++) {
-            if (memcmp(s_active_sensors[j].mac, s_discovered[i].mac, 6) == 0) {
+            // Compare with byte reversal: config is big-endian, discovered is little-endian
+            bool match = true;
+            for (int k = 0; k < 6; k++) {
+                if (s_active_sensors[j].mac[k] != s_discovered[i].mac[5 - k]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
                 already_known = true;
                 ESP_LOGI(TAG, "  Sensor %02X:%02X:%02X:%02X:%02X:%02X already configured as '%s'",
-                         s_discovered[i].mac[0], s_discovered[i].mac[1],
-                         s_discovered[i].mac[2], s_discovered[i].mac[3],
-                         s_discovered[i].mac[4], s_discovered[i].mac[5],
+                         s_discovered[i].mac[5], s_discovered[i].mac[4],
+                         s_discovered[i].mac[3], s_discovered[i].mac[2],
+                         s_discovered[i].mac[1], s_discovered[i].mac[0],
                          s_active_sensors[j].name);
                 break;
             }
         }
         if (!already_known) {
             inkbird_sensor_config_t *slot = &s_active_sensors[s_active_sensor_count];
-            memcpy(slot->mac, s_discovered[i].mac, 6);
+            // Convert discovered MAC (little-endian) to config format (big-endian)
+            for (int k = 0; k < 6; k++) {
+                slot->mac[k] = s_discovered[i].mac[5 - k];
+            }
             if (s_discovered[i].name[0]) {
                 strncpy(slot->name, s_discovered[i].name, sizeof(slot->name) - 1);
                 slot->name[sizeof(slot->name) - 1] = '\0';

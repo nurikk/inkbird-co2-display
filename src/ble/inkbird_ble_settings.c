@@ -1,6 +1,6 @@
 /**
  * @file inkbird_ble_settings.c
- * @brief Settings synchronization for Inkbird sensors
+ * @brief Settings synchronization for Inkbird sensors (NimBLE)
  *
  * Handles reading and writing sensor configuration:
  * - CO2 mode settings (display mode, custom mode, auto calibration)
@@ -30,7 +30,7 @@ uint8_t inkbird_calc_checksum(const uint8_t *data, size_t len)
 }
 
 /**
- * @brief Helper to send a command and wait for acknowledgment
+ * @brief Helper to send a command and wait for acknowledgment (NimBLE version)
  */
 esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, size_t len, uint32_t timeout_ms)
 {
@@ -40,8 +40,8 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
 
     // Close any existing connections and clear peer list
     for (int i = 0; i < s_peer_count; i++) {
-        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
-            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
     }
     if (s_peer_count > 0) {
@@ -51,7 +51,7 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
 
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
-    // Create a peer for this sensor (required for OPEN_EVT handler)
+    // Create a peer for this sensor
     inkbird_peer_t *peer = peer_add(sensor_idx);
     if (peer == NULL) {
         return ESP_ERR_NO_MEM;
@@ -61,29 +61,20 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;
-    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+    memcpy(&s_target_addr, &peer->remote_addr, sizeof(s_target_addr));
 
-    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_PUBLIC, true);
-    if (ret != ESP_OK) {
-        ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_RANDOM, true);
-    }
-
-    if (ret != ESP_OK) {
-        s_peer_count = 0;
-        return ret;
-    }
+    // Start connection
+    inkbird_start_connect(peer);
 
     // Wait for connection
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms));
     bool connected = (peer != NULL && peer->connected);
 
-    if (got_sem != pdTRUE || !connected || peer->cmd_char_handle == 0) {
-        if (connected) {
-            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
-        } else {
-            esp_ble_gap_disconnect(peer->remote_bda);
-            vTaskDelay(pdMS_TO_TICKS(500));
+    if (got_sem != pdTRUE || !connected || peer->cmd_char_val_handle == 0) {
+        if (connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
+        vTaskDelay(pdMS_TO_TICKS(500));
         s_peer_count = 0;
         s_connected = false;
         return ESP_ERR_TIMEOUT;
@@ -91,8 +82,8 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
 
     // Update legacy globals from peer
     s_connected = true;
-    s_conn_id = peer->conn_id;
-    s_cmd_char_handle = peer->cmd_char_handle;
+    s_conn_handle = peer->conn_handle;
+    s_cmd_char_handle = peer->cmd_char_val_handle;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -100,14 +91,16 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
     ESP_LOGI(TAG, "Sending settings command:");
     ESP_LOG_BUFFER_HEX(TAG, cmd, len);
 
-    ret = esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-        len, (uint8_t *)cmd, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    int rc = ble_gattc_write_flat(peer->conn_handle, peer->cmd_char_val_handle,
+                                   cmd, len, NULL, NULL);
+
+    esp_err_t ret = (rc == 0) ? ESP_OK : ESP_FAIL;
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
     // Disconnect and clean up
-    if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+    if (peer->connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+        ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
     s_peer_count = 0;
@@ -153,8 +146,8 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
 
     // Close any existing connections and clear peer list
     for (int i = 0; i < s_peer_count; i++) {
-        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
-            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
     }
     if (s_peer_count > 0) {
@@ -165,7 +158,7 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
     // Drain stale semaphore signals
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
-    // Create a peer for this sensor (required for OPEN_EVT handler)
+    // Create a peer for this sensor
     inkbird_peer_t *peer = peer_add(sensor_idx);
     if (peer == NULL) {
         ESP_LOGE(TAG, "Failed to create peer for sensor %d", sensor_idx);
@@ -178,20 +171,10 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
     s_settings_responses_received = 0;
     s_data_received = false;
     s_connected = false;
-    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+    memcpy(&s_target_addr, &peer->remote_addr, sizeof(s_target_addr));
 
-    // Connect
-    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_PUBLIC, true);
-    if (ret != ESP_OK) {
-        ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_RANDOM, true);
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect: %s", esp_err_to_name(ret));
-        s_settings_request_mode = false;
-        s_peer_count = 0;
-        return ret;
-    }
+    // Start connection
+    inkbird_start_connect(peer);
 
     // Wait for connection and CCCD setup
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms / 2));
@@ -200,12 +183,10 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
     if (got_sem != pdTRUE || !connected) {
         ESP_LOGE(TAG, "Connection timeout");
         s_settings_request_mode = false;
-        if (connected) {
-            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
-        } else {
-            esp_ble_gap_disconnect(peer->remote_bda);
-            vTaskDelay(pdMS_TO_TICKS(500));
+        if (connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
+        vTaskDelay(pdMS_TO_TICKS(500));
         s_peer_count = 0;
         s_connected = false;
         return ESP_ERR_TIMEOUT;
@@ -213,33 +194,29 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
 
     // Update legacy globals from peer
     s_connected = true;
-    s_conn_id = peer->conn_id;
-    s_cmd_char_handle = peer->cmd_char_handle;
+    s_conn_handle = peer->conn_handle;
+    s_cmd_char_handle = peer->cmd_char_val_handle;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // Send all settings query commands
-    if (peer->cmd_char_handle != 0) {
+    if (peer->cmd_char_val_handle != 0) {
         ESP_LOGI(TAG, "Sending settings query commands...");
 
-        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-            sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
-            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        ble_gattc_write_flat(peer->conn_handle, peer->cmd_char_val_handle,
+            CMD_CO2_SETTINGS, sizeof(CMD_CO2_SETTINGS), NULL, NULL);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-            sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
-            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        ble_gattc_write_flat(peer->conn_handle, peer->cmd_char_val_handle,
+            CMD_CO2_THRESHOLDS, sizeof(CMD_CO2_THRESHOLDS), NULL, NULL);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-            sizeof(CMD_CO2_ALARM), (uint8_t *)CMD_CO2_ALARM,
-            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        ble_gattc_write_flat(peer->conn_handle, peer->cmd_char_val_handle,
+            CMD_CO2_ALARM, sizeof(CMD_CO2_ALARM), NULL, NULL);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-            sizeof(CMD_CALIBRATION), (uint8_t *)CMD_CALIBRATION,
-            ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+        ble_gattc_write_flat(peer->conn_handle, peer->cmd_char_val_handle,
+            CMD_CALIBRATION, sizeof(CMD_CALIBRATION), NULL, NULL);
     }
 
     // Wait for responses
@@ -248,8 +225,8 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
     ESP_LOGI(TAG, "Settings responses received: %d/4", s_settings_responses_received);
 
     // Disconnect and clean up
-    if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+    if (peer->connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+        ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 

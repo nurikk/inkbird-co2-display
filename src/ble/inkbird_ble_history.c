@@ -1,6 +1,6 @@
 /**
  * @file inkbird_ble_history.c
- * @brief Historical data download implementation for Inkbird sensors
+ * @brief Historical data download implementation for Inkbird sensors (NimBLE)
  *
  * Handles downloading and parsing of historical sensor data:
  * - Record count parsing and validation
@@ -18,11 +18,11 @@ static const char *TAG = "inkbird_history";
 // ============================================================================
 
 /**
- * @brief Send a command to the sensor via FFE9
+ * @brief Send a command to the sensor via FFE9 (NimBLE version)
  */
 esp_err_t inkbird_send_history_command(const uint8_t *cmd, size_t len)
 {
-    if (!s_connected || s_gattc_if == ESP_GATT_IF_NONE || s_cmd_char_handle == 0) {
+    if (!s_connected || s_conn_handle == INVALID_CONN_HANDLE || s_cmd_char_handle == 0) {
         ESP_LOGE(TAG, "Cannot send command: not connected or no command handle");
         return ESP_ERR_INVALID_STATE;
     }
@@ -30,16 +30,15 @@ esp_err_t inkbird_send_history_command(const uint8_t *cmd, size_t len)
     ESP_LOGI(TAG, "Sending command to FFE9 (handle=%d):", s_cmd_char_handle);
     ESP_LOG_BUFFER_HEX(TAG, cmd, len);
 
-    esp_err_t ret = esp_ble_gattc_write_char(
-        s_gattc_if, s_conn_id, s_cmd_char_handle,
-        len, (uint8_t *)cmd,
-        ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+    int rc = ble_gattc_write_flat(s_conn_handle, s_cmd_char_handle,
+                                   cmd, len, NULL, NULL);
 
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Write command failed: %s", esp_err_to_name(ret));
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Write command failed: %d", rc);
+        return ESP_FAIL;
     }
 
-    return ret;
+    return ESP_OK;
 }
 
 /**
@@ -264,7 +263,7 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 }
 
 // ============================================================================
-// History Public API
+// History Public API - NimBLE version
 // ============================================================================
 
 esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
@@ -295,8 +294,7 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         }
     }
 
-    // Reset history state - keep IDLE until we're ready to send command
-    // Use s_history_setup_mode to tell protocol to skip pairing
+    // Reset history state
     s_history_state = INKBIRD_HISTORY_IDLE;
     s_history_setup_mode = true;  // Signal protocol to skip pairing after CCCD
     s_history_records = records;
@@ -311,15 +309,15 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     *out_count = 0;
 
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Starting History Download");
+    ESP_LOGI(TAG, "  Starting History Download (NimBLE)");
     ESP_LOGI(TAG, "  Sensor: %d (%s)", sensor_idx, s_active_sensors[sensor_idx].name);
     ESP_LOGI(TAG, "  Max records: %u", max_records);
     ESP_LOGI(TAG, "========================================");
 
-    // Close any existing connections and clear peer list (like one_shot_read)
+    // Close any existing connections and clear peer list
     for (int i = 0; i < s_peer_count; i++) {
-        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
-            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
     }
     if (s_peer_count > 0) {
@@ -330,7 +328,7 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     // Drain stale semaphore signals
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
-    // Create a peer for this sensor (required for OPEN_EVT handler)
+    // Create a peer for this sensor
     inkbird_peer_t *peer = peer_add(sensor_idx);
     if (peer == NULL) {
         ESP_LOGE(TAG, "Failed to create peer for sensor %d", sensor_idx);
@@ -343,30 +341,15 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;
-    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+    memcpy(&s_target_addr, &peer->remote_addr, sizeof(s_target_addr));
 
     ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",
-             peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
-             peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
+             peer->remote_addr.val[5], peer->remote_addr.val[4],
+             peer->remote_addr.val[3], peer->remote_addr.val[2],
+             peer->remote_addr.val[1], peer->remote_addr.val[0]);
 
-    esp_err_t ret = esp_ble_gattc_open(
-        s_gattc_if, peer->remote_bda,
-        BLE_ADDR_TYPE_PUBLIC, true);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Public addr failed, trying random...");
-        ret = esp_ble_gattc_open(
-            s_gattc_if, peer->remote_bda,
-            BLE_ADDR_TYPE_RANDOM, true);
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Connection failed: %s", esp_err_to_name(ret));
-        s_peer_count = 0;  // Clean up peer
-        s_history_setup_mode = false;
-        s_history_state = INKBIRD_HISTORY_IDLE;
-        return ret;
-    }
+    // Start connection
+    inkbird_start_connect(peer);
 
     // Wait for connection and notification setup
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(30000));
@@ -375,13 +358,11 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     if (got_sem != pdTRUE || !connected) {
         ESP_LOGE(TAG, "Connection timeout or failed (got_sem=%d, connected=%d)",
                  got_sem == pdTRUE, connected);
-        if (connected) {
-            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
-        } else {
-            esp_ble_gap_disconnect(peer->remote_bda);
-            vTaskDelay(pdMS_TO_TICKS(500));
+        if (connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
-        s_peer_count = 0;  // Clean up peer
+        vTaskDelay(pdMS_TO_TICKS(500));
+        s_peer_count = 0;
         s_history_setup_mode = false;
         s_history_state = INKBIRD_HISTORY_IDLE;
         return ESP_ERR_TIMEOUT;
@@ -389,7 +370,8 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
 
     // Update legacy globals from peer state
     s_connected = true;
-    s_conn_id = peer->conn_id;
+    s_conn_handle = peer->conn_handle;
+    s_cmd_char_handle = peer->cmd_char_val_handle;
 
     // Small delay after notification setup
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -401,11 +383,13 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     // Send history start command
     ESP_LOGI(TAG, "Sending history start command...");
 
-    ret = inkbird_send_history_command(CMD_HISTORY_START, sizeof(CMD_HISTORY_START));
+    esp_err_t ret = inkbird_send_history_command(CMD_HISTORY_START, sizeof(CMD_HISTORY_START));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send history command");
-        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
-        s_peer_count = 0;  // Clean up peer
+        if (peer->conn_handle != INVALID_CONN_HANDLE) {
+            ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        s_peer_count = 0;
         s_connected = false;
         s_history_state = INKBIRD_HISTORY_IDLE;
         return ret;
@@ -422,8 +406,8 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
 
     // Disconnect
     ESP_LOGI(TAG, "Disconnecting...");
-    if (peer != NULL && peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+    if (peer != NULL && peer->connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+        ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 

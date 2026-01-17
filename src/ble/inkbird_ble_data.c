@@ -1,6 +1,6 @@
 /**
  * @file inkbird_ble_data.c
- * @brief Data parsing and real-time reading for Inkbird sensors
+ * @brief Data parsing and real-time reading for Inkbird sensors (NimBLE)
  *
  * Handles parsing of sensor data notifications including:
  * - Real-time environmental data (CO2, temperature, humidity, pressure)
@@ -72,23 +72,23 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
                 ESP_LOGI(TAG, "History setup mode: pairing complete, signaling ready");
                 // Update legacy globals for history compatibility
                 s_current_sensor_index = peer->sensor_idx;
-                s_conn_id = peer->conn_id;
-                s_cmd_char_handle = peer->cmd_char_handle;
+                s_conn_handle = peer->conn_handle;
+                s_cmd_char_handle = peer->cmd_char_val_handle;
                 xSemaphoreGive(s_read_complete_sem);
                 return false;
             }
 
             // Normal mode: send real-time data request after pairing
-            if (peer != NULL && peer->cmd_char_handle != 0 &&
+            if (peer != NULL && peer->cmd_char_val_handle != 0 &&
                 s_history_state == INKBIRD_HISTORY_IDLE && !s_settings_request_mode) {
                 sensor_data_set_status(sensor_idx, "Requesting...");
 
                 // Send real-time data request (0x09) first - this is what we need
                 ESP_LOGI(TAG, "Sending real-time data request...");
-                esp_ble_gattc_write_char(
-                    s_gattc_if, peer->conn_id, peer->cmd_char_handle,
-                    sizeof(CMD_REALTIME_DATA), (uint8_t *)CMD_REALTIME_DATA,
-                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                ble_gattc_write_flat(peer->conn_handle,
+                                      peer->cmd_char_val_handle,
+                                      CMD_REALTIME_DATA, sizeof(CMD_REALTIME_DATA),
+                                      NULL, NULL);
             }
             return false;
         }
@@ -224,6 +224,8 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         ESP_LOGI(TAG, "  Temperature: %.1f C", reading->temperature / 10.0f);
         ESP_LOGI(TAG, "  Humidity: %.1f%%", reading->humidity / 10.0f);
         ESP_LOGI(TAG, "  Pressure: %u hPa", reading->pressure);
+
+        sensor_data_set_status(sensor_idx, NULL);  // Clear status on success
         return true;
     }
 
@@ -242,12 +244,12 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
 }
 
 // ============================================================================
-// Read Task (Sequential with Peer Management)
+// Read Task (Sequential with Peer Management) - NimBLE version
 // ============================================================================
 
 void inkbird_read_task(void *arg)
 {
-    ESP_LOGI(TAG, "Read task started (sequential mode with peer management)");
+    ESP_LOGI(TAG, "Read task started (sequential mode with NimBLE)");
 
     while (s_running) {
         ESP_LOGI(TAG, "=== Starting read cycle for %d sensors ===", s_active_sensor_count);
@@ -277,36 +279,19 @@ void inkbird_read_task(void *arg)
             // Drain stale semaphore signals
             while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
+            // Update legacy globals
+            s_current_sensor_index = i;
+            s_data_received = false;
+            s_connected = false;
+
             ESP_LOGI(TAG, "Connecting to sensor %d (%s): %02X:%02X:%02X:%02X:%02X:%02X",
                      peer->sensor_idx, s_active_sensors[peer->sensor_idx].name,
-                     peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
-                     peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
+                     peer->remote_addr.val[5], peer->remote_addr.val[4],
+                     peer->remote_addr.val[3], peer->remote_addr.val[2],
+                     peer->remote_addr.val[1], peer->remote_addr.val[0]);
 
-            // Open connection
-            esp_err_t ret = esp_ble_gattc_open(
-                s_gattc_if, peer->remote_bda,
-                BLE_ADDR_TYPE_PUBLIC, true);
-
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "GATTC open failed: %s, trying random addr", esp_err_to_name(ret));
-                ret = esp_ble_gattc_open(
-                    s_gattc_if, peer->remote_bda,
-                    BLE_ADDR_TYPE_RANDOM, true);
-            }
-
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to initiate connection to sensor %d: %s",
-                         peer->sensor_idx, esp_err_to_name(ret));
-                s_failure_count[i]++;
-
-                if (s_failure_count[i] >= INKBIRD_MAX_FAILURES) {
-                    ESP_LOGW(TAG, "Sensor %d: %d failures, skipping %d cycles",
-                             i, s_failure_count[i], INKBIRD_SKIP_CYCLES_ON_FAILURE);
-                    s_skip_cycles[i] = INKBIRD_SKIP_CYCLES_ON_FAILURE;
-                    s_failure_count[i] = 0;
-                }
-                continue;
-            }
+            // Start connection
+            inkbird_start_connect(peer);
 
             // Wait for data or timeout
             BaseType_t got_data = xSemaphoreTake(s_read_complete_sem,
@@ -329,12 +314,9 @@ void inkbird_read_task(void *arg)
             }
 
             // Disconnect
-            if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
-                esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+            if (peer->connected && peer->conn_handle != INVALID_CONN_HANDLE) {
+                ble_gap_terminate(peer->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                 vTaskDelay(pdMS_TO_TICKS(500));
-            } else if (s_gattc_if != ESP_GATT_IF_NONE) {
-                esp_ble_gap_disconnect(peer->remote_bda);
-                vTaskDelay(pdMS_TO_TICKS(300));
             }
 
             // Small delay between sensors
