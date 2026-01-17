@@ -149,11 +149,17 @@ void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
         uint8_t curr = interval_mins;
         uint16_t elapsed;
 
-        if (prev > curr) {
-            elapsed = prev - curr;
-        } else if (prev < curr) {
-            elapsed = prev + (60 - curr);
+        // Records are in OLDEST-to-NEWEST order after history download reordering
+        // So time progresses forward: interval values generally increase
+        // e.g., 17→18→19→...→59→0→1→...
+        if (curr > prev) {
+            // Normal forward progression: 17→18 = 1 minute
+            elapsed = curr - prev;
+        } else if (curr < prev) {
+            // Hour rollover: 59→0 = 1 minute
+            elapsed = (60 - prev) + curr;
         } else {
+            // Same minute (duplicate record or same-minute reading)
             elapsed = 0;
         }
 

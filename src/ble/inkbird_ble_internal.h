@@ -189,6 +189,9 @@ extern size_t s_history_buffer_len;
 extern SemaphoreHandle_t s_history_complete_sem;
 extern uint16_t s_history_write_idx;
 extern bool s_history_buffer_wrapped;
+extern bool s_history_setup_mode;  // True during connection setup for history download
+extern uint8_t s_history_downsample_rate;  // Sample every Nth record (1=no downsampling)
+extern uint16_t s_history_downsample_counter;  // Counter for downsampling
 
 // ============================================================================
 // Internal Function Declarations

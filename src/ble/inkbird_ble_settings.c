@@ -38,39 +38,61 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Close any existing connection
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    // Close any existing connections and clear peer list
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
+            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        }
+    }
+    if (s_peer_count > 0) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+    s_peer_count = 0;
 
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
+    // Create a peer for this sensor (required for OPEN_EVT handler)
+    inkbird_peer_t *peer = peer_add(sensor_idx);
+    if (peer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Set legacy globals for compatibility
     s_current_sensor_index = sensor_idx;
     s_data_received = false;
     s_connected = false;
     memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
 
-    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_PUBLIC, true);
+    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_PUBLIC, true);
     if (ret != ESP_OK) {
-        ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_RANDOM, true);
+        ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_RANDOM, true);
     }
 
     if (ret != ESP_OK) {
+        s_peer_count = 0;
         return ret;
     }
 
     // Wait for connection
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms));
-    if (got_sem != pdTRUE || !s_connected || s_cmd_char_handle == 0) {
-        if (s_connected) {
-            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    bool connected = (peer != NULL && peer->connected);
+
+    if (got_sem != pdTRUE || !connected || peer->cmd_char_handle == 0) {
+        if (connected) {
+            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         } else {
-            esp_ble_gap_disconnect(s_target_bda);
+            esp_ble_gap_disconnect(peer->remote_bda);
             vTaskDelay(pdMS_TO_TICKS(500));
         }
+        s_peer_count = 0;
+        s_connected = false;
         return ESP_ERR_TIMEOUT;
     }
+
+    // Update legacy globals from peer
+    s_connected = true;
+    s_conn_id = peer->conn_id;
+    s_cmd_char_handle = peer->cmd_char_handle;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -78,16 +100,18 @@ esp_err_t inkbird_send_settings_command(uint8_t sensor_idx, const uint8_t *cmd, 
     ESP_LOGI(TAG, "Sending settings command:");
     ESP_LOG_BUFFER_HEX(TAG, cmd, len);
 
-    ret = esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+    ret = esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
         len, (uint8_t *)cmd, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Disconnect
-    if (s_connected) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    // Disconnect and clean up
+    if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+    s_peer_count = 0;
+    s_connected = false;
 
     return ret;
 }
@@ -127,14 +151,26 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
 
     ESP_LOGI(TAG, "Requesting settings from sensor %d...", sensor_idx);
 
-    // Close any existing connection
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    // Close any existing connections and clear peer list
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
+            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        }
     }
+    if (s_peer_count > 0) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    s_peer_count = 0;
 
     // Drain stale semaphore signals
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
+
+    // Create a peer for this sensor (required for OPEN_EVT handler)
+    inkbird_peer_t *peer = peer_add(sensor_idx);
+    if (peer == NULL) {
+        ESP_LOGE(TAG, "Failed to create peer for sensor %d", sensor_idx);
+        return ESP_ERR_NO_MEM;
+    }
 
     // Set up for settings request
     s_current_sensor_index = sensor_idx;
@@ -145,53 +181,63 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
     memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
 
     // Connect
-    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_PUBLIC, true);
+    esp_err_t ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_PUBLIC, true);
     if (ret != ESP_OK) {
-        ret = esp_ble_gattc_open(s_gattc_if, s_target_bda, BLE_ADDR_TYPE_RANDOM, true);
+        ret = esp_ble_gattc_open(s_gattc_if, peer->remote_bda, BLE_ADDR_TYPE_RANDOM, true);
     }
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect: %s", esp_err_to_name(ret));
         s_settings_request_mode = false;
+        s_peer_count = 0;
         return ret;
     }
 
     // Wait for connection and CCCD setup
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(timeout_ms / 2));
-    if (got_sem != pdTRUE || !s_connected) {
+    bool connected = (peer != NULL && peer->connected);
+
+    if (got_sem != pdTRUE || !connected) {
         ESP_LOGE(TAG, "Connection timeout");
         s_settings_request_mode = false;
-        if (s_connected) {
-            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+        if (connected) {
+            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         } else {
-            esp_ble_gap_disconnect(s_target_bda);
+            esp_ble_gap_disconnect(peer->remote_bda);
             vTaskDelay(pdMS_TO_TICKS(500));
         }
+        s_peer_count = 0;
+        s_connected = false;
         return ESP_ERR_TIMEOUT;
     }
+
+    // Update legacy globals from peer
+    s_connected = true;
+    s_conn_id = peer->conn_id;
+    s_cmd_char_handle = peer->cmd_char_handle;
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // Send all settings query commands
-    if (s_cmd_char_handle != 0) {
+    if (peer->cmd_char_handle != 0) {
         ESP_LOGI(TAG, "Sending settings query commands...");
 
-        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
             sizeof(CMD_CO2_SETTINGS), (uint8_t *)CMD_CO2_SETTINGS,
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
             sizeof(CMD_CO2_THRESHOLDS), (uint8_t *)CMD_CO2_THRESHOLDS,
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
             sizeof(CMD_CO2_ALARM), (uint8_t *)CMD_CO2_ALARM,
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_ble_gattc_write_char(s_gattc_if, s_conn_id, s_cmd_char_handle,
+        esp_ble_gattc_write_char(s_gattc_if, peer->conn_id, peer->cmd_char_handle,
             sizeof(CMD_CALIBRATION), (uint8_t *)CMD_CALIBRATION,
             ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
     }
@@ -201,13 +247,14 @@ esp_err_t inkbird_ble_request_settings(uint8_t sensor_idx, uint32_t timeout_ms)
 
     ESP_LOGI(TAG, "Settings responses received: %d/4", s_settings_responses_received);
 
-    // Disconnect
-    if (s_connected && s_gattc_if != ESP_GATT_IF_NONE) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    // Disconnect and clean up
+    if (peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     s_settings_request_mode = false;
+    s_peer_count = 0;
     s_connected = false;
 
     return (s_settings_responses_received > 0) ? ESP_OK : ESP_ERR_TIMEOUT;

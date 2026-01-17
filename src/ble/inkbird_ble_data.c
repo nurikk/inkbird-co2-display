@@ -48,9 +48,9 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         // Parse pairing response (cmd 0x08) per protocol section 7.2
         if (cmd_id == 0x08 && len >= 5) {
             uint8_t status = data[4];
-            ESP_LOGI(TAG, "Pairing response: %s (0x%02X) for sensor %d",
+            ESP_LOGI(TAG, "Pairing response: %s (0x%02X) for sensor %d (history_mode=%d)",
                      status == 0x00 ? "ready" : status == 0x02 ? "success" : "unknown",
-                     status, sensor_idx);
+                     status, sensor_idx, s_history_setup_mode);
 
             // Find the peer for this sensor to get the correct handles
             inkbird_peer_t *peer = NULL;
@@ -61,9 +61,25 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
                 }
             }
 
-            // After pairing, send settings/data requests
-            if ((status == 0x00 || status == 0x02) && peer != NULL &&
-                peer->cmd_char_handle != 0 &&
+            // Check if pairing succeeded
+            if (status != 0x00 && status != 0x02) {
+                ESP_LOGW(TAG, "Pairing failed with status 0x%02X", status);
+                return false;
+            }
+
+            // In history setup mode, signal completion so history download can proceed
+            if (s_history_setup_mode && peer != NULL) {
+                ESP_LOGI(TAG, "History setup mode: pairing complete, signaling ready");
+                // Update legacy globals for history compatibility
+                s_current_sensor_index = peer->sensor_idx;
+                s_conn_id = peer->conn_id;
+                s_cmd_char_handle = peer->cmd_char_handle;
+                xSemaphoreGive(s_read_complete_sem);
+                return false;
+            }
+
+            // Normal mode: send real-time data request after pairing
+            if (peer != NULL && peer->cmd_char_handle != 0 &&
                 s_history_state == INKBIRD_HISTORY_IDLE && !s_settings_request_mode) {
                 sensor_data_set_status(sensor_idx, "Requesting...");
 

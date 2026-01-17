@@ -56,7 +56,7 @@ bool inkbird_is_empty_record(const uint8_t *data)
 }
 
 /**
- * @brief Parse a single 10-byte history record using circular buffer
+ * @brief Parse a single 10-byte history record with downsampling
  *
  * Format from APK (IadW1Model.setHistory):
  * - Bytes 0-1: CO2 (big-endian)
@@ -67,9 +67,11 @@ bool inkbird_is_empty_record(const uint8_t *data)
  * - Bytes 7-8: Pressure/HAP (big-endian)
  * - Byte 9: Time interval in minutes
  *
- * Uses circular buffer to keep the NEWEST records.
+ * When downsampling is enabled (s_history_downsample_rate > 1), only every
+ * Nth record is stored. This allows covering longer time spans with limited
+ * buffer space (e.g., 1500 records downsampled to 200 covers full 24h+).
  *
- * @return true if record was stored, false if skipped (empty/invalid)
+ * @return true if record was stored, false if skipped (empty/invalid/downsampled)
  */
 bool inkbird_parse_history_record(const uint8_t *data)
 {
@@ -90,7 +92,23 @@ bool inkbird_parse_history_record(const uint8_t *data)
         return false;
     }
 
-    // Write to current position in circular buffer
+    // Count this as a valid received record
+    s_history_received_count++;
+
+    // Downsampling: only store every Nth record
+    s_history_downsample_counter++;
+    if (s_history_downsample_counter < s_history_downsample_rate) {
+        // Skip this record (downsampled out)
+        return false;
+    }
+    s_history_downsample_counter = 0;  // Reset counter, store this record
+
+    // Avoid buffer overflow - stop if buffer is full
+    if (s_history_write_idx >= s_history_max_records) {
+        return false;
+    }
+
+    // Write to current position in buffer (sequential, not circular)
     inkbird_history_record_t *rec = &s_history_records[s_history_write_idx];
 
     // CO2: bytes 0-1 (big-endian)
@@ -111,21 +129,17 @@ bool inkbird_parse_history_record(const uint8_t *data)
     // Pressure: bytes 7-8 (big-endian)
     rec->pressure = ((uint16_t)data[7] << 8) | data[8];
 
-    // Interval: byte 9
+    // Interval: byte 9 - scale by downsample rate for proper time reconstruction
     rec->interval_mins = data[9];
 
-    s_history_received_count++;
-
-    ESP_LOGD(TAG, "History[%d->%d]: CO2=%u, T=%d, H=%u, P=%u, Int=%u",
+    ESP_LOGD(TAG, "History[rx=%d->buf=%d]: CO2=%u, T=%d, H=%u, P=%u, Int=%u (ds=%d)",
              s_history_received_count, s_history_write_idx, rec->co2_ppm,
-             rec->temperature, rec->humidity, rec->pressure, rec->interval_mins);
+             rec->temperature, rec->humidity, rec->pressure, rec->interval_mins,
+             s_history_downsample_rate);
 
-    // Advance write index (circular)
+    // Advance write index (sequential)
     s_history_write_idx++;
-    if (s_history_write_idx >= s_history_max_records) {
-        s_history_write_idx = 0;
-        s_history_buffer_wrapped = true;
-    }
+    s_history_stored_count = s_history_write_idx;
 
     return true;
 }
@@ -170,8 +184,19 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
             s_history_expected_count = ((uint16_t)data[0] << 8) | data[1];
             s_history_got_count = true;
             s_history_state = INKBIRD_HISTORY_RECEIVING;
-            ESP_LOGI(TAG, ">>> History record count: %u (raw: 0x%02X%02X) <<<",
-                     s_history_expected_count, data[0], data[1]);
+
+            // Calculate downsample rate to fit all data in buffer
+            // If sensor has 1500 records and we can only store 200, sample every 8th
+            if (s_history_expected_count > s_history_max_records) {
+                // Add 1 to ensure we don't overflow (round up)
+                s_history_downsample_rate = (s_history_expected_count + s_history_max_records - 1) / s_history_max_records;
+            } else {
+                s_history_downsample_rate = 1;  // No downsampling needed
+            }
+            s_history_downsample_counter = 0;
+
+            ESP_LOGI(TAG, ">>> History record count: %u (raw: 0x%02X%02X), downsample=%d <<<",
+                     s_history_expected_count, data[0], data[1], s_history_downsample_rate);
 
             // Process remaining data in this packet
             if (len > 2) {
@@ -270,8 +295,10 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         }
     }
 
-    // Reset history state
-    s_history_state = INKBIRD_HISTORY_REQUESTING;
+    // Reset history state - keep IDLE until we're ready to send command
+    // Use s_history_setup_mode to tell protocol to skip pairing
+    s_history_state = INKBIRD_HISTORY_IDLE;
+    s_history_setup_mode = true;  // Signal protocol to skip pairing after CCCD
     s_history_records = records;
     s_history_max_records = max_records;
     s_history_expected_count = 0;
@@ -289,51 +316,87 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     ESP_LOGI(TAG, "  Max records: %u", max_records);
     ESP_LOGI(TAG, "========================================");
 
-    // Connect to sensor
-    s_current_sensor_index = sensor_idx;
-    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
-    s_data_received = false;
-
-    ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",
-             s_target_bda[0], s_target_bda[1], s_target_bda[2],
-             s_target_bda[3], s_target_bda[4], s_target_bda[5]);
+    // Close any existing connections and clear peer list (like one_shot_read)
+    for (int i = 0; i < s_peer_count; i++) {
+        if (s_peers[i].connected && s_gattc_if != ESP_GATT_IF_NONE) {
+            esp_ble_gattc_close(s_gattc_if, s_peers[i].conn_id);
+        }
+    }
+    if (s_peer_count > 0) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    s_peer_count = 0;
 
     // Drain stale semaphore signals
     while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
+    // Create a peer for this sensor (required for OPEN_EVT handler)
+    inkbird_peer_t *peer = peer_add(sensor_idx);
+    if (peer == NULL) {
+        ESP_LOGE(TAG, "Failed to create peer for sensor %d", sensor_idx);
+        s_history_setup_mode = false;
+        s_history_state = INKBIRD_HISTORY_IDLE;
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Set legacy globals for compatibility
+    s_current_sensor_index = sensor_idx;
+    s_data_received = false;
+    s_connected = false;
+    memcpy(s_target_bda, s_active_sensors[sensor_idx].mac, 6);
+
+    ESP_LOGI(TAG, "Connecting to %02X:%02X:%02X:%02X:%02X:%02X...",
+             peer->remote_bda[0], peer->remote_bda[1], peer->remote_bda[2],
+             peer->remote_bda[3], peer->remote_bda[4], peer->remote_bda[5]);
+
     esp_err_t ret = esp_ble_gattc_open(
-        s_gattc_if, s_target_bda,
+        s_gattc_if, peer->remote_bda,
         BLE_ADDR_TYPE_PUBLIC, true);
 
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Public addr failed, trying random...");
         ret = esp_ble_gattc_open(
-            s_gattc_if, s_target_bda,
+            s_gattc_if, peer->remote_bda,
             BLE_ADDR_TYPE_RANDOM, true);
     }
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Connection failed: %s", esp_err_to_name(ret));
-        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
+        s_peer_count = 0;  // Clean up peer
+        s_history_setup_mode = false;
+        s_history_state = INKBIRD_HISTORY_IDLE;
         return ret;
     }
 
     // Wait for connection and notification setup
     BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(30000));
-    if (got_sem != pdTRUE || !s_connected) {
-        ESP_LOGE(TAG, "Connection timeout or failed");
-        if (s_connected) {
-            esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    bool connected = (peer != NULL && peer->connected);
+
+    if (got_sem != pdTRUE || !connected) {
+        ESP_LOGE(TAG, "Connection timeout or failed (got_sem=%d, connected=%d)",
+                 got_sem == pdTRUE, connected);
+        if (connected) {
+            esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         } else {
-            esp_ble_gap_disconnect(s_target_bda);
+            esp_ble_gap_disconnect(peer->remote_bda);
             vTaskDelay(pdMS_TO_TICKS(500));
         }
-        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
+        s_peer_count = 0;  // Clean up peer
+        s_history_setup_mode = false;
+        s_history_state = INKBIRD_HISTORY_IDLE;
         return ESP_ERR_TIMEOUT;
     }
 
+    // Update legacy globals from peer state
+    s_connected = true;
+    s_conn_id = peer->conn_id;
+
     // Small delay after notification setup
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Now switch to history mode - notifications will be routed to history parser
+    s_history_setup_mode = false;
+    s_history_state = INKBIRD_HISTORY_REQUESTING;
 
     // Send history start command
     ESP_LOGI(TAG, "Sending history start command...");
@@ -341,8 +404,10 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     ret = inkbird_send_history_command(CMD_HISTORY_START, sizeof(CMD_HISTORY_START));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send history command");
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
-        s_history_state = INKBIRD_HISTORY_IDLE;  // Reset to allow normal mode reads
+        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
+        s_peer_count = 0;  // Clean up peer
+        s_connected = false;
+        s_history_state = INKBIRD_HISTORY_IDLE;
         return ret;
     }
 
@@ -357,39 +422,15 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
 
     // Disconnect
     ESP_LOGI(TAG, "Disconnecting...");
-    if (s_connected) {
-        esp_ble_gattc_close(s_gattc_if, s_conn_id);
+    if (peer != NULL && peer->connected && s_gattc_if != ESP_GATT_IF_NONE) {
+        esp_ble_gattc_close(s_gattc_if, peer->conn_id);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    // Calculate stored count and reorder circular buffer
-    if (s_history_buffer_wrapped) {
-        s_history_stored_count = s_history_max_records;
-
-        ESP_LOGI(TAG, "Reordering circular buffer (wrapped at idx %u)...", s_history_write_idx);
-
-        // Allocate temp buffer for reordering
-        inkbird_history_record_t *temp = pvPortMalloc(sizeof(inkbird_history_record_t) * s_history_max_records);
-        if (temp != NULL) {
-            // Copy from write_idx to end (older records)
-            uint16_t first_part = s_history_max_records - s_history_write_idx;
-            memcpy(temp, &records[s_history_write_idx], sizeof(inkbird_history_record_t) * first_part);
-
-            // Copy from start to write_idx (newer records)
-            memcpy(&temp[first_part], records, sizeof(inkbird_history_record_t) * s_history_write_idx);
-
-            // Copy back to original buffer
-            memcpy(records, temp, sizeof(inkbird_history_record_t) * s_history_max_records);
-
-            vPortFree(temp);
-            ESP_LOGI(TAG, "Buffer reordered: oldest at [0], newest at [%u]", s_history_max_records - 1);
-        } else {
-            ESP_LOGW(TAG, "Failed to allocate temp buffer for reordering");
-        }
-    } else {
-        s_history_stored_count = s_history_write_idx;
-        ESP_LOGI(TAG, "Buffer did not wrap, %u records in order", s_history_stored_count);
-    }
+    // With downsampling, we use sequential storage (no circular buffer/reordering needed)
+    // Records are already in oldest-to-newest order
+    ESP_LOGI(TAG, "Sequential buffer: %u records stored (downsample=%d)",
+             s_history_stored_count, s_history_downsample_rate);
 
     // Report results
     *out_count = s_history_stored_count;
@@ -406,9 +447,12 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     bool success = (s_history_state == INKBIRD_HISTORY_COMPLETE ||
         (s_history_stored_count > 0 && s_history_received_count > s_history_expected_count * 9 / 10));
 
-    // Reset state
+    // Reset state and clean up peer
+    s_history_setup_mode = false;
     s_history_state = INKBIRD_HISTORY_IDLE;
     s_history_records = NULL;
+    s_peer_count = 0;
+    s_connected = false;
 
     if (success) {
         ESP_LOGI(TAG, "History download considered successful");
@@ -426,11 +470,17 @@ esp_err_t inkbird_ble_cancel_history(void)
 
     ESP_LOGI(TAG, "Cancelling history download...");
 
+    // Send stop command to sensor (may fail if already disconnected)
     esp_err_t ret = inkbird_send_history_command(CMD_HISTORY_STOP, sizeof(CMD_HISTORY_STOP));
 
     s_history_state = INKBIRD_HISTORY_IDLE;
     s_history_records = NULL;
     s_history_buffer_len = 0;
+
+    // Wake up any task waiting on the semaphore
+    if (s_history_complete_sem != NULL) {
+        xSemaphoreGive(s_history_complete_sem);
+    }
 
     return ret;
 }
@@ -448,4 +498,9 @@ void inkbird_ble_get_history_progress(uint16_t *out_expected, uint16_t *out_rece
     if (out_received != NULL) {
         *out_received = s_history_received_count;
     }
+}
+
+uint8_t inkbird_ble_get_history_downsample_rate(void)
+{
+    return s_history_downsample_rate;
 }

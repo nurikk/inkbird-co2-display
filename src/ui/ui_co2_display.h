@@ -38,6 +38,16 @@ void ui_co2_display_force_refresh(void);
  */
 int ui_co2_display_get_touch_type(void);
 
+/**
+ * @brief Open the detail screen for a specific sensor
+ *
+ * Shows the detail screen and starts downloading historical data.
+ * Used for programmatic navigation (e.g., auto-open after boot).
+ *
+ * @param sensor_idx Sensor index (0-3)
+ */
+void ui_co2_display_open_detail(int sensor_idx);
+
 #ifdef __cplusplus
 }
 #endif

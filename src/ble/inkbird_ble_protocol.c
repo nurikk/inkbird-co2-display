@@ -401,29 +401,19 @@ void inkbird_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc
             ESP_LOGI(TAG, "CCCD write success - notifications enabled (sensor %d)",
                      peer->sensor_idx);
 
-            // For history download mode, signal that setup is complete
-            // For normal mode, send pairing request first per protocol section 7.2
-            ESP_LOGI(TAG, "s_history_state=%d (IDLE=0)", s_history_state);
-            if (s_history_state != INKBIRD_HISTORY_IDLE) {
-                ESP_LOGI(TAG, "History mode: signaling setup complete");
-                // Update legacy globals for history compatibility
-                s_current_sensor_index = peer->sensor_idx;
-                s_conn_id = peer->conn_id;
-                s_cmd_char_handle = peer->cmd_char_handle;
-                xSemaphoreGive(s_read_complete_sem);
+            // Always send pairing request first per protocol section 7.2
+            // The sensor requires pairing before any other commands (including history)
+            sensor_data_set_status(peer->sensor_idx, "Pairing...");
+            if (peer->cmd_char_handle != 0) {
+                ESP_LOGI(TAG, "Sending pairing request (sensor %d, history_mode=%d)...",
+                         peer->sensor_idx, s_history_setup_mode);
+                esp_ble_gattc_write_char(
+                    gattc_if, peer->conn_id, peer->cmd_char_handle,
+                    sizeof(CMD_PAIRING), (uint8_t *)CMD_PAIRING,
+                    ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
             } else {
-                sensor_data_set_status(peer->sensor_idx, "Pairing...");
-                if (peer->cmd_char_handle != 0) {
-                    // Send pairing request (0x08) per protocol section 7.2
-                    ESP_LOGI(TAG, "Sending pairing request (sensor %d)...", peer->sensor_idx);
-                    esp_ble_gattc_write_char(
-                        gattc_if, peer->conn_id, peer->cmd_char_handle,
-                        sizeof(CMD_PAIRING), (uint8_t *)CMD_PAIRING,
-                        ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-                } else {
-                    ESP_LOGW(TAG, "No command handle for sensor %d, waiting for passive notification...",
-                             peer->sensor_idx);
-                }
+                ESP_LOGW(TAG, "No command handle for sensor %d, waiting for passive notification...",
+                         peer->sensor_idx);
             }
             break;
 

@@ -260,6 +260,17 @@ inkbird_history_state_t inkbird_ble_get_history_state(void);
 void inkbird_ble_get_history_progress(uint16_t *out_expected, uint16_t *out_received);
 
 /**
+ * @brief Get the downsample rate used in the last history download
+ *
+ * When the sensor has more records than the buffer can hold, records are
+ * downsampled by storing every Nth record. This function returns that N value.
+ * Use this to correctly reconstruct timestamps when processing downloaded data.
+ *
+ * @return Downsample rate (1 = no downsampling, N = every Nth record stored)
+ */
+uint8_t inkbird_ble_get_history_downsample_rate(void);
+
+/**
  * @brief Start discovery scan for Inkbird sensors
  *
  * Scans for BLE devices advertising the Inkbird service UUID.

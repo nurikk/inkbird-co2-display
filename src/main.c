@@ -26,6 +26,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 
 #include "lvgl.h"
 
@@ -33,11 +34,19 @@
 
 #include "epd_driver.h"
 #include "sensor_data.h"
+#include "detail_history.h"
 #include "ui_co2_display.h"
 #include "inkbird_ble.h"
 #include "led_control.h"
 
 static const char *TAG = "main";
+
+// Heap monitoring macro
+#define LOG_HEAP(label) do { \
+    ESP_LOGI(TAG, "HEAP [%s]: free=%lu, largest=%lu", label, \
+             (unsigned long)esp_get_free_heap_size(), \
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)); \
+} while(0)
 
 // Update intervals
 #define SENSOR_UPDATE_MS        60000   // Sensor data update (1 minute)
@@ -58,7 +67,9 @@ static const char *TAG = "main";
 
 // History download configuration
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
-#define DOWNLOAD_HISTORY_ON_STARTUP  true  // Set to false to skip history download
+// NOTE: Disabled due to heap exhaustion - BLE stack needs more runtime memory
+// The detail screen on-demand download still works via detail_history module
+#define DOWNLOAD_HISTORY_ON_STARTUP  false  // Set to false to skip history download
 
 // FreeRTOS timer handles
 static TimerHandle_t s_sensor_timer = NULL;
@@ -107,6 +118,8 @@ static void download_sensor_history(uint8_t sensor_idx)
         );
     }
     xTimerStart(s_progress_timer, 0);
+
+    LOG_HEAP("before BLE download");  // Check heap right before BLE connection
 
     uint16_t count = 0;
     esp_err_t ret = inkbird_ble_download_history(
@@ -175,6 +188,8 @@ static void download_sensor_history(uint8_t sensor_idx)
 static void history_download_task(void *arg)
 {
     (void)arg;
+
+    LOG_HEAP("history_task start");  // Check heap after 8KB task stack allocation
 
     uint8_t active_count = inkbird_ble_get_active_count();
 
@@ -318,6 +333,12 @@ static bool read_initial_sensor_value(int sensor_idx)
  */
 static bool any_sensor_downloading(void)
 {
+    // Check if detail history download is in progress
+    if (detail_history_get_state() == DETAIL_HISTORY_IN_PROGRESS) {
+        return true;
+    }
+
+    // Check startup history sync
     uint8_t active = inkbird_ble_get_active_count();
     for (int i = 0; i < active; i++) {
         sensor_data_t *sensor = sensor_data_get(i);
@@ -401,6 +422,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initializing sensor data...");
     sensor_data_init();
+    detail_history_init();
 
     ESP_LOGI(TAG, "Initializing UI...");
     ui_co2_display_init();
@@ -478,6 +500,7 @@ void app_main(void)
 
     uint8_t active_count = inkbird_ble_get_active_count();
     ESP_LOGI(TAG, "[Stage 4] Found %d active sensors", active_count);
+    LOG_HEAP("after discovery");
 
     for (int i = 0; i < active_count; i++) {
         sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
@@ -498,6 +521,7 @@ void app_main(void)
         read_initial_sensor_value(i);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    LOG_HEAP("after Phase 1");
 
     // ========== PHASE 1.5: Load device settings ==========
     ESP_LOGI(TAG, "");
@@ -518,6 +542,7 @@ void app_main(void)
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+    LOG_HEAP("after Phase 1.5");
 
     // ========== PHASE 2: Set up display timers ==========
     ESP_LOGI(TAG, "");
@@ -545,6 +570,7 @@ void app_main(void)
     xTimerStart(s_refresh_timer, 0);
 
     ESP_LOGI(TAG, "Display will refresh every %d seconds", DISPLAY_REFRESH_MS / 1000);
+    LOG_HEAP("after Phase 2");
 
 #if DOWNLOAD_HISTORY_ON_STARTUP
     // ========== PHASE 3: Download historical data (then start periodic BLE) ==========
@@ -558,7 +584,7 @@ void app_main(void)
     xTaskCreatePinnedToCore(
         history_download_task,
         "history_dl",
-        8192,
+        4096,  // Reduced from 8192 to avoid heap fragmentation
         NULL,
         4,
         &s_history_task,
@@ -570,6 +596,8 @@ void app_main(void)
 #endif
 
     ESP_LOGI(TAG, "Initialization complete!");
+    ESP_LOGI(TAG, "Tap a sensor tile to view its detail page with history chart.");
+    ESP_LOGI(TAG, "(History will download with downsampling to cover ~24 hours)");
 
     // Main task can sleep
     while (1) {

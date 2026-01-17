@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "sdkconfig.h"
 
@@ -32,6 +33,7 @@
 #include "inkbird_ble.h"
 #include "gt911_touch.h"
 #include "xpt2046_touch.h"
+#include "detail_history.h"
 
 typedef enum {
     TOUCH_TYPE_NONE,
@@ -208,6 +210,13 @@ static int s_plot_left_x = 2;
 static int s_plot_right_x = 0;
 static lv_obj_t *s_detail_x_labels[3] = {NULL, NULL, NULL};
 static int s_y_label_positions[5];
+
+// Loading overlay for detail screen
+static lv_obj_t *s_loading_overlay = NULL;
+static lv_obj_t *s_loading_spinner = NULL;
+static lv_obj_t *s_loading_progress_label = NULL;
+static lv_obj_t *s_loading_cancel_btn = NULL;
+static detail_history_state_t s_last_download_state = DETAIL_HISTORY_IDLE;
 
 // Settings screen
 static lv_obj_t *s_settings_screen = NULL;
@@ -755,11 +764,28 @@ static void create_settings_screen(void)
     create_settings_row(s_settings_screen, SETTINGS_COL2_X, y2, "Temp Unit:", &s_settings_unit_label);
 }
 
+static void loading_cancel_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "Download cancel requested");
+    detail_history_cancel_download();
+}
+
 static void back_btn_event_cb(lv_event_t *e)
 {
     (void)e;
+
+    // Cancel any ongoing download
+    if (detail_history_get_state() == DETAIL_HISTORY_IN_PROGRESS) {
+        detail_history_cancel_download();
+    }
+
+    // Clear detail history buffer
+    detail_history_clear();
+
     s_selected_sensor = -1;
     s_selected_metric = -1;
+    s_last_download_state = DETAIL_HISTORY_IDLE;
     lv_screen_load(s_main_screen);
 }
 
@@ -772,6 +798,40 @@ static void update_detail_screen(int sensor_idx)
     sensor_data_t *sensor = sensor_data_get(sensor_idx);
     if (sensor == NULL) {
         return;
+    }
+
+    // Handle download state changes
+    detail_history_state_t dl_state = detail_history_get_state();
+    if (dl_state != s_last_download_state) {
+        s_last_download_state = dl_state;
+
+        if (dl_state == DETAIL_HISTORY_COMPLETE) {
+            // Download finished, hide overlay
+            ESP_LOGI(TAG, "Extended history download complete");
+            if (s_loading_overlay != NULL) {
+                lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+            }
+        } else if (dl_state == DETAIL_HISTORY_CANCELLED) {
+            // Download cancelled, hide overlay
+            ESP_LOGI(TAG, "Extended history download cancelled");
+            if (s_loading_overlay != NULL) {
+                lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+            }
+        } else if (dl_state == DETAIL_HISTORY_ERROR) {
+            // Download error, hide overlay
+            ESP_LOGW(TAG, "Extended history download failed");
+            if (s_loading_overlay != NULL) {
+                lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+
+    // Update progress if downloading
+    if (dl_state == DETAIL_HISTORY_IN_PROGRESS && s_loading_progress_label != NULL) {
+        uint8_t progress = detail_history_get_progress();
+        char progress_str[24];
+        snprintf(progress_str, sizeof(progress_str), "Syncing %d%%", progress);
+        lv_label_set_text(s_loading_progress_label, progress_str);
     }
 
     for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
@@ -833,20 +893,29 @@ static void update_detail_screen(int sensor_idx)
         lv_label_set_text(s_detail_pres_value, "---- hPa");
     }
 
-    uint8_t history_count = 0;
-    const int16_t *co2_hist = sensor_data_get_co2_history(sensor_idx, &history_count);
-    if (history_count > 1 && co2_hist != NULL) {
-        for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
-            s_detail_co2_data[j] = co2_hist[j];
-        }
-        lv_chart_set_series_values(s_detail_chart, s_detail_co2_series, s_detail_co2_data, SENSOR_HISTORY_SIZE);
-        lv_chart_set_series_color(s_detail_chart, s_detail_co2_series, col);
-    }
+    // Check if we have extended history data available
+    uint16_t detail_count = detail_history_get_count();
+    bool use_extended = (dl_state == DETAIL_HISTORY_COMPLETE || dl_state == DETAIL_HISTORY_CANCELLED)
+                        && detail_count > 0
+                        && detail_history_get_sensor_idx() == sensor_idx;
 
-    const int16_t *temp_hist = sensor_data_get_temp_history(sensor_idx, &history_count);
-    if (history_count > 1 && temp_hist != NULL) {
+    if (use_extended) {
+        // Use extended history data (downsampled from up to 2880 points to SENSOR_HISTORY_SIZE)
+        const int16_t *ext_co2 = detail_history_get_co2(NULL);
+        const int16_t *ext_temp = detail_history_get_temp(NULL);
+        const int16_t *ext_hum = detail_history_get_hum(NULL);
+        const int16_t *ext_pres = detail_history_get_pres(NULL);
+
+        // Downsample: pick evenly spaced points from extended history
         for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
-            int16_t t = temp_hist[j];
+            uint16_t src_idx = (j * detail_count) / SENSOR_HISTORY_SIZE;
+            if (src_idx >= detail_count) src_idx = detail_count - 1;
+
+            // CO2 (direct)
+            s_detail_co2_data[j] = ext_co2[src_idx];
+
+            // Temperature (scale to chart range)
+            int16_t t = ext_temp[src_idx];
             int32_t val;
             if (t <= 0 || t < TEMP_MIN_TENTHS - 50 || t > TEMP_MAX_TENTHS + 100) {
                 val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
@@ -856,15 +925,9 @@ static void update_detail_screen(int sensor_idx)
             if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
             if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
             s_detail_temp_data[j] = val;
-        }
-        lv_chart_set_series_values(s_detail_chart, s_detail_temp_series, s_detail_temp_data, SENSOR_HISTORY_SIZE);
-    }
 
-    const int16_t *hum_hist = sensor_data_get_hum_history(sensor_idx, &history_count);
-    if (history_count > 1 && hum_hist != NULL) {
-        for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
-            int16_t h = hum_hist[j];
-            int32_t val;
+            // Humidity (scale to chart range)
+            int16_t h = ext_hum[src_idx];
             if (h <= 0 || h > 100) {
                 val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
             } else {
@@ -873,15 +936,9 @@ static void update_detail_screen(int sensor_idx)
             if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
             if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
             s_detail_hum_data[j] = val;
-        }
-        lv_chart_set_series_values(s_detail_chart, s_detail_hum_series, s_detail_hum_data, SENSOR_HISTORY_SIZE);
-    }
 
-    const int16_t *pres_hist = sensor_data_get_pres_history(sensor_idx, &history_count);
-    if (history_count > 1 && pres_hist != NULL) {
-        for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
-            int16_t p = pres_hist[j];
-            int32_t val;
+            // Pressure (scale to chart range)
+            int16_t p = ext_pres[src_idx];
             if (p <= 0 || p < PRES_MIN_HPA || p > PRES_MAX_HPA) {
                 val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
             } else {
@@ -891,12 +948,87 @@ static void update_detail_screen(int sensor_idx)
             if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
             s_detail_pres_data[j] = val;
         }
+
+        lv_chart_set_series_values(s_detail_chart, s_detail_co2_series, s_detail_co2_data, SENSOR_HISTORY_SIZE);
+        lv_chart_set_series_color(s_detail_chart, s_detail_co2_series, col);
+        lv_chart_set_series_values(s_detail_chart, s_detail_temp_series, s_detail_temp_data, SENSOR_HISTORY_SIZE);
+        lv_chart_set_series_values(s_detail_chart, s_detail_hum_series, s_detail_hum_data, SENSOR_HISTORY_SIZE);
         lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
+
+    } else {
+        // Use short buffer data (60 points from sensor_data)
+        uint8_t history_count = 0;
+        const int16_t *co2_hist = sensor_data_get_co2_history(sensor_idx, &history_count);
+        if (history_count > 1 && co2_hist != NULL) {
+            for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+                s_detail_co2_data[j] = co2_hist[j];
+            }
+            lv_chart_set_series_values(s_detail_chart, s_detail_co2_series, s_detail_co2_data, SENSOR_HISTORY_SIZE);
+            lv_chart_set_series_color(s_detail_chart, s_detail_co2_series, col);
+        }
+
+        const int16_t *temp_hist = sensor_data_get_temp_history(sensor_idx, &history_count);
+        if (history_count > 1 && temp_hist != NULL) {
+            for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+                int16_t t = temp_hist[j];
+                int32_t val;
+                if (t <= 0 || t < TEMP_MIN_TENTHS - 50 || t > TEMP_MAX_TENTHS + 100) {
+                    val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
+                } else {
+                    val = DETAIL_CHART_Y_MIN + ((t - TEMP_MIN_TENTHS) * DETAIL_CHART_Y_RANGE / TEMP_RANGE_TENTHS);
+                }
+                if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+                if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
+                s_detail_temp_data[j] = val;
+            }
+            lv_chart_set_series_values(s_detail_chart, s_detail_temp_series, s_detail_temp_data, SENSOR_HISTORY_SIZE);
+        }
+
+        const int16_t *hum_hist = sensor_data_get_hum_history(sensor_idx, &history_count);
+        if (history_count > 1 && hum_hist != NULL) {
+            for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+                int16_t h = hum_hist[j];
+                int32_t val;
+                if (h <= 0 || h > 100) {
+                    val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
+                } else {
+                    val = DETAIL_CHART_Y_MIN + ((h - HUM_MIN_PERCENT) * DETAIL_CHART_Y_RANGE / HUM_RANGE_PERCENT);
+                }
+                if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+                if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
+                s_detail_hum_data[j] = val;
+            }
+            lv_chart_set_series_values(s_detail_chart, s_detail_hum_series, s_detail_hum_data, SENSOR_HISTORY_SIZE);
+        }
+
+        const int16_t *pres_hist = sensor_data_get_pres_history(sensor_idx, &history_count);
+        if (history_count > 1 && pres_hist != NULL) {
+            for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
+                int16_t p = pres_hist[j];
+                int32_t val;
+                if (p <= 0 || p < PRES_MIN_HPA || p > PRES_MAX_HPA) {
+                    val = (DETAIL_CHART_Y_MIN + DETAIL_CHART_Y_MAX) / 2;
+                } else {
+                    val = DETAIL_CHART_Y_MIN + ((p - PRES_MIN_HPA) * DETAIL_CHART_Y_RANGE / PRES_RANGE_HPA);
+                }
+                if (val < DETAIL_CHART_Y_MIN) val = DETAIL_CHART_Y_MIN;
+                if (val > DETAIL_CHART_Y_MAX) val = DETAIL_CHART_Y_MAX;
+                s_detail_pres_data[j] = val;
+            }
+            lv_chart_set_series_values(s_detail_chart, s_detail_pres_series, s_detail_pres_data, SENSOR_HISTORY_SIZE);
+        }
     }
 
     update_metric_selection();
 
-    uint16_t total_mins = sensor_data_get_total_minutes(sensor_idx);
+    // Update time labels
+    uint16_t total_mins;
+    if (use_extended) {
+        total_mins = detail_history_get_total_minutes();
+    } else {
+        total_mins = sensor_data_get_total_minutes(sensor_idx);
+    }
+
     if (total_mins > 0 && s_detail_x_labels[0] != NULL) {
         char label_buf[16];
 
@@ -1145,12 +1277,89 @@ static void create_detail_screen(void)
     lv_label_set_text(s_detail_x_labels[2], "now");
     lv_obj_set_pos(s_detail_x_labels[2], plot_right - PLOT_X_LABEL_END_OFFSET, plot_bottom + PLOT_X_LABEL_Y_OFFSET);
 
+    // Create loading overlay (initially hidden)
+    s_loading_overlay = lv_obj_create(s_detail_screen);
+    lv_obj_set_size(s_loading_overlay, UI_DISPLAY_WIDTH, UI_DISPLAY_HEIGHT);
+    lv_obj_set_pos(s_loading_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_loading_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_loading_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_loading_overlay, 0, 0);
+    lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    // Loading spinner
+    s_loading_spinner = lv_spinner_create(s_loading_overlay);
+    lv_obj_set_size(s_loading_spinner, 50, 50);
+    lv_obj_align(s_loading_spinner, LV_ALIGN_CENTER, 0, -30);
+    lv_spinner_set_anim_params(s_loading_spinner, 1000, 200);
+
+    // Progress label
+    s_loading_progress_label = lv_label_create(s_loading_overlay);
+    lv_obj_set_style_text_color(s_loading_progress_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(s_loading_progress_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_loading_progress_label, "Syncing 0%");
+    lv_obj_align(s_loading_progress_label, LV_ALIGN_CENTER, 0, 20);
+
+    // Cancel button
+    s_loading_cancel_btn = lv_btn_create(s_loading_overlay);
+    lv_obj_set_size(s_loading_cancel_btn, 80, 32);
+    lv_obj_align(s_loading_cancel_btn, LV_ALIGN_CENTER, 0, 60);
+    lv_obj_set_style_bg_color(s_loading_cancel_btn, lv_color_hex(COLOR_ALERT), 0);
+    lv_obj_set_style_radius(s_loading_cancel_btn, 6, 0);
+    lv_obj_add_event_cb(s_loading_cancel_btn, loading_cancel_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cancel_label = lv_label_create(s_loading_cancel_btn);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_set_style_text_color(cancel_label, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_font(cancel_label, &lv_font_montserrat_12, 0);
+    lv_obj_center(cancel_label);
 }
 
 static void tile_click_cb(lv_event_t *e)
 {
     int sensor_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    ESP_LOGI(TAG, ">>> Tile clicked: sensor_idx=%d", sensor_idx);
+
     if (sensor_idx < 0 || sensor_idx >= SENSOR_COUNT) {
+        ESP_LOGW(TAG, "Invalid sensor index, ignoring click");
+        return;
+    }
+
+    s_selected_sensor = sensor_idx;
+    s_last_download_state = DETAIL_HISTORY_IDLE;
+
+    if (s_detail_screen == NULL) {
+        create_detail_screen();
+    }
+
+    // Update with short buffer data first (quick display)
+    update_detail_screen(sensor_idx);
+    lv_screen_load(s_detail_screen);
+
+    // Show loading overlay and start async download
+    if (s_loading_overlay != NULL) {
+        lv_label_set_text(s_loading_progress_label, "Syncing 0%");
+        lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Start async download of extended history
+    if (detail_history_start_download(sensor_idx)) {
+        ESP_LOGI(TAG, "Started extended history download for sensor %d", sensor_idx);
+    } else {
+        // Download failed to start, hide overlay
+        ESP_LOGW(TAG, "Failed to start history download for sensor %d", sensor_idx);
+        if (s_loading_overlay != NULL) {
+            lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void ui_co2_display_open_detail(int sensor_idx)
+{
+    ESP_LOGI(TAG, ">>> Opening detail screen programmatically: sensor_idx=%d", sensor_idx);
+
+    if (sensor_idx < 0 || sensor_idx >= SENSOR_COUNT) {
+        ESP_LOGW(TAG, "Invalid sensor index, ignoring");
         return;
     }
 
@@ -1160,8 +1369,46 @@ static void tile_click_cb(lv_event_t *e)
         create_detail_screen();
     }
 
+    // Check if history data is already available for this sensor
+    detail_history_state_t state = detail_history_get_state();
+    uint16_t count = detail_history_get_count();
+    uint8_t current_sensor = detail_history_get_sensor_idx();
+
+    if (state == DETAIL_HISTORY_COMPLETE && count > 0 && current_sensor == (uint8_t)sensor_idx) {
+        // History data already available, just show the detail screen
+        ESP_LOGI(TAG, "Using existing history data: %u records", count);
+        s_last_download_state = DETAIL_HISTORY_COMPLETE;
+        update_detail_screen(sensor_idx);
+        lv_screen_load(s_detail_screen);
+        // Hide loading overlay since data is ready
+        if (s_loading_overlay != NULL) {
+            lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    s_last_download_state = DETAIL_HISTORY_IDLE;
+
+    // Update with short buffer data first (quick display)
     update_detail_screen(sensor_idx);
     lv_screen_load(s_detail_screen);
+
+    // Show loading overlay and start async download
+    if (s_loading_overlay != NULL) {
+        lv_label_set_text(s_loading_progress_label, "Syncing 0%");
+        lv_obj_clear_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Start async download of extended history
+    if (detail_history_start_download(sensor_idx)) {
+        ESP_LOGI(TAG, "Started extended history download for sensor %d", sensor_idx);
+    } else {
+        // Download failed to start, hide overlay
+        ESP_LOGW(TAG, "Failed to start history download for sensor %d", sensor_idx);
+        if (s_loading_overlay != NULL) {
+            lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int tile_h)

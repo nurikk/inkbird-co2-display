@@ -127,6 +127,9 @@ size_t s_history_buffer_len = 0;
 SemaphoreHandle_t s_history_complete_sem = NULL;
 uint16_t s_history_write_idx = 0;
 bool s_history_buffer_wrapped = false;
+bool s_history_setup_mode = false;
+uint8_t s_history_downsample_rate = 1;  // Sample every Nth record (1=no downsampling)
+uint16_t s_history_downsample_counter = 0;  // Counter for downsampling
 
 // ============================================================================
 // Peer Manager Functions
