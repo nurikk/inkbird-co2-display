@@ -489,25 +489,37 @@ void app_main(void)
     );
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // ========== STAGE 4: Discover sensors ==========
+    // ========== STAGE 4: Load known sensors ==========
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[Stage 4] Discovering sensors...");
-    ui_co2_display_set_status("Scanning...");
-    s_do_refresh = true;
+    ESP_LOGI(TAG, "[Stage 4] Loading known sensors...");
 
-    inkbird_ble_discover();
-    inkbird_ble_register_discovered();
+    // Load known sensors from config + NVS
+    inkbird_ble_load_known_sensors();
+    uint8_t known_count = inkbird_ble_get_active_count();
+    ESP_LOGI(TAG, "[Stage 4] Loaded %d known sensor(s)", known_count);
 
-    uint8_t active_count = inkbird_ble_get_active_count();
-    ESP_LOGI(TAG, "[Stage 4] Found %d active sensors", active_count);
-    LOG_HEAP("after discovery");
+    // If no known sensors, run discovery immediately
+    if (known_count == 0) {
+        ESP_LOGI(TAG, "[Stage 4] No known sensors, running discovery first");
+        ui_co2_display_set_status("Scanning...");
+        s_do_refresh = true;
+
+        inkbird_ble_discover();
+        inkbird_ble_register_discovered();
+        inkbird_ble_save_to_nvs();
+        known_count = inkbird_ble_get_active_count();
+    }
+
+    uint8_t active_count = known_count;
+    ESP_LOGI(TAG, "[Stage 4] Active sensors: %d", active_count);
+    LOG_HEAP("after loading sensors");
 
     for (int i = 0; i < active_count; i++) {
         sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
         sensor_data_set_activity_status(i, "Pending...");
     }
 
-    // BLE init and sensor discovery complete - show main screen
+    // BLE init complete - show main screen
     ui_co2_display_loading_complete();
     s_do_refresh = true;
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -515,7 +527,7 @@ void app_main(void)
     // ========== SENSOR INITIALIZATION: Each sensor fully initialized before moving to next ==========
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Initializing Sensors (one at a time)");
+    ESP_LOGI(TAG, "  Initializing Known Sensors");
     ESP_LOGI(TAG, "========================================");
 
     for (int i = 0; i < active_count; i++) {
@@ -551,7 +563,75 @@ void app_main(void)
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  All sensors initialized!");
+    ESP_LOGI(TAG, "  Known sensors initialized!");
+    ESP_LOGI(TAG, "========================================");
+
+    // ========== STAGE 5: Discover additional sensors if room available ==========
+    if (active_count < INKBIRD_SENSOR_COUNT) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "[Stage 5] Room for %d more sensor(s), scanning for new devices...",
+                 INKBIRD_SENSOR_COUNT - active_count);
+        ui_co2_display_set_status("Scanning...");
+        s_do_refresh = true;
+
+        uint8_t before_count = active_count;
+        inkbird_ble_discover();
+        inkbird_ble_register_discovered();
+
+        uint8_t new_count = inkbird_ble_get_active_count();
+        uint8_t discovered_new = new_count - before_count;
+
+        if (discovered_new > 0) {
+            ESP_LOGI(TAG, "[Stage 5] Found %d new sensor(s), saving to NVS", discovered_new);
+            inkbird_ble_save_to_nvs();
+
+            // Initialize newly discovered sensors
+            ESP_LOGI(TAG, "");
+            ESP_LOGI(TAG, "========================================");
+            ESP_LOGI(TAG, "  Initializing New Sensors");
+            ESP_LOGI(TAG, "========================================");
+
+            for (int i = before_count; i < new_count; i++) {
+                const char *name = inkbird_ble_get_sensor_name(i);
+                ESP_LOGI(TAG, "");
+                ESP_LOGI(TAG, "--- New Sensor %d: %s ---", i, name);
+
+                sensor_data_set_name(i, name);
+                sensor_data_t *sensor = sensor_data_get(i);
+
+                sensor_data_set_activity_status(i, "Reading...");
+                s_do_refresh = true;
+                read_initial_sensor_value(i);
+                vTaskDelay(pdMS_TO_TICKS(200));
+
+#if DOWNLOAD_HISTORY_ON_STARTUP
+                if (sensor) {
+                    sensor->downloading = true;
+                }
+                s_do_refresh = true;
+                download_sensor_history(i);
+                vTaskDelay(pdMS_TO_TICKS(200));
+#endif
+
+                sensor_data_set_activity_status(i, NULL);
+                s_do_refresh = true;
+
+                ESP_LOGI(TAG, "  Sensor %d ready", i);
+                LOG_HEAP("after new sensor init");
+            }
+
+            active_count = new_count;
+        } else {
+            ESP_LOGI(TAG, "[Stage 5] No new sensors found");
+        }
+    } else {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "[Stage 5] All %d sensor slots filled, skipping discovery", INKBIRD_SENSOR_COUNT);
+    }
+
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  All %d sensors ready!", active_count);
     ESP_LOGI(TAG, "========================================");
 
     // ========== Set up display timers ==========

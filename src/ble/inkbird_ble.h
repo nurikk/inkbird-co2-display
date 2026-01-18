@@ -436,6 +436,65 @@ esp_err_t inkbird_ble_calibrate_co2(uint8_t sensor_idx, uint16_t cal_value);
  */
 esp_err_t inkbird_ble_reset_co2(uint8_t sensor_idx);
 
+// ============================================================================
+// Smart Discovery APIs (skip discovery if known sensors are reachable)
+// ============================================================================
+
+/**
+ * @brief Connection test result
+ */
+typedef struct {
+    uint8_t reachable_count;    // Number of sensors that responded
+    uint8_t total_count;        // Total sensors tested
+    bool all_reachable;         // true if all known sensors responded
+} inkbird_connection_test_result_t;
+
+/**
+ * @brief Load known sensors from config and NVS
+ *
+ * Merges sensors from INKBIRD_SENSORS (compile-time config) with
+ * sensors stored in NVS (runtime discovered). Config sensors take
+ * priority for naming if MAC addresses match.
+ *
+ * Call this instead of relying on inkbird_ble_init() to load sensors.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t inkbird_ble_load_known_sensors(void);
+
+/**
+ * @brief Test connectivity to all known sensors
+ *
+ * Attempts a quick connection to each active sensor with a short timeout.
+ * Use this to check if known sensors are reachable before deciding
+ * whether to run full discovery.
+ *
+ * @param result Pointer to store test results
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t inkbird_ble_test_connections(inkbird_connection_test_result_t *result);
+
+/**
+ * @brief Save discovered sensors to NVS
+ *
+ * Persists any sensors in the active list that aren't already in
+ * INKBIRD_SENSORS config. Call after discovery to remember new sensors
+ * across reboots.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t inkbird_ble_save_to_nvs(void);
+
+/**
+ * @brief Clear all sensors stored in NVS
+ *
+ * Removes all persisted sensor data from NVS. Config sensors
+ * (INKBIRD_SENSORS) are not affected.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t inkbird_ble_clear_nvs(void);
+
 #ifdef __cplusplus
 }
 #endif

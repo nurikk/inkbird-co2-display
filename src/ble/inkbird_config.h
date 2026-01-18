@@ -129,6 +129,20 @@ static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
 // Number of retry attempts for initial sensor read at startup
 #define INKBIRD_STARTUP_READ_RETRIES     3
 
+// Timeout for connection test per sensor (milliseconds)
+// Used during smart discovery to quickly check if known sensors are reachable
+#define INKBIRD_CONNECTION_TEST_TIMEOUT_MS  10000
+
+// ============================================================================
+// NVS Configuration
+// ============================================================================
+
+// NVS namespace for storing discovered sensors
+#define INKBIRD_NVS_NAMESPACE           "inkbird"
+
+// Maximum sensors to store in NVS (separate from compile-time config)
+#define INKBIRD_NVS_MAX_SENSORS         8
+
 #ifdef __cplusplus
 }
 #endif
