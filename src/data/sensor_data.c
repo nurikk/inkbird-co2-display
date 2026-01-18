@@ -444,16 +444,24 @@ void sensor_data_set_name(uint8_t index, const char *name)
     s_sensors[index].name[sizeof(s_sensors[index].name) - 1] = '\0';
 }
 
-void sensor_data_set_status(uint8_t index, const char *status)
+void sensor_data_set_activity_status(uint8_t index, const char *status)
 {
     if (index >= SENSOR_COUNT) {
         return;
     }
 
     if (status == NULL) {
-        s_sensors[index].status_text[0] = '\0';
+        s_sensors[index].activity_status[0] = '\0';
     } else {
-        strncpy(s_sensors[index].status_text, status, sizeof(s_sensors[index].status_text) - 1);
-        s_sensors[index].status_text[sizeof(s_sensors[index].status_text) - 1] = '\0';
+        strncpy(s_sensors[index].activity_status, status, sizeof(s_sensors[index].activity_status) - 1);
+        s_sensors[index].activity_status[sizeof(s_sensors[index].activity_status) - 1] = '\0';
     }
+}
+
+const char *sensor_data_get_activity_status(uint8_t index)
+{
+    if (index >= SENSOR_COUNT) {
+        return "";
+    }
+    return s_sensors[index].activity_status;
 }

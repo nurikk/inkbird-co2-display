@@ -69,7 +69,7 @@ static const char *TAG = "main";
 // Use SENSOR_HISTORY_SIZE so we download exactly what the chart can display
 // NOTE: Disabled due to heap exhaustion - BLE stack needs more runtime memory
 // The detail screen on-demand download still works via detail_history module
-#define DOWNLOAD_HISTORY_ON_STARTUP  false  // Set to false to skip history download
+#define DOWNLOAD_HISTORY_ON_STARTUP  true   // Download history on startup
 
 // FreeRTOS timer handles
 static TimerHandle_t s_sensor_timer = NULL;
@@ -443,7 +443,7 @@ void app_main(void)
 
     // Set initial status for all sensors before showing main screen
     for (int i = 0; i < SENSOR_COUNT; i++) {
-        sensor_data_set_status(i, "Waiting...");
+        sensor_data_set_activity_status(i, "Waiting...");
     }
 
     // Trigger main screen creation by calling update
@@ -504,53 +504,57 @@ void app_main(void)
 
     for (int i = 0; i < active_count; i++) {
         sensor_data_set_name(i, inkbird_ble_get_sensor_name(i));
-        sensor_data_set_status(i, "Waiting...");
+        sensor_data_set_activity_status(i, "Pending...");
     }
 
+    // BLE init and sensor discovery complete - show main screen
+    ui_co2_display_loading_complete();
     s_do_refresh = true;
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // ========== PHASE 1: Read current real-time values ==========
+    // ========== SENSOR INITIALIZATION: Each sensor fully initialized before moving to next ==========
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 1: Reading Current Sensor Values");
+    ESP_LOGI(TAG, "  Initializing Sensors (one at a time)");
     ESP_LOGI(TAG, "========================================");
+
     for (int i = 0; i < active_count; i++) {
-        sensor_data_set_status(i, "Connecting...");
+        const char *name = inkbird_ble_get_sensor_name(i);
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "--- Sensor %d: %s ---", i, name);
+
+        sensor_data_t *sensor = sensor_data_get(i);
+
+        // Step 1: Get current reading (also receives settings automatically)
+        sensor_data_set_activity_status(i, "Reading...");
         s_do_refresh = true;
         read_initial_sensor_value(i);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    LOG_HEAP("after Phase 1");
+        vTaskDelay(pdMS_TO_TICKS(200));
 
-    // ========== PHASE 1.5: Load device settings ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 1.5: Loading Device Settings");
-    ESP_LOGI(TAG, "========================================");
-    for (int i = 0; i < active_count; i++) {
-        char status_buf[32];
-        snprintf(status_buf, sizeof(status_buf), "Loading settings %d/%d...", i + 1, active_count);
-        sensor_data_set_status(i, status_buf);
+#if DOWNLOAD_HISTORY_ON_STARTUP
+        // Step 2: Download history
+        if (sensor) {
+            sensor->downloading = true;
+        }
+        s_do_refresh = true;
+        download_sensor_history(i);
+        vTaskDelay(pdMS_TO_TICKS(200));
+#endif
+
+        // Clear status - sensor is ready
+        sensor_data_set_activity_status(i, NULL);
         s_do_refresh = true;
 
-        esp_err_t ret = inkbird_ble_request_settings(i, 10000);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Sensor %d settings loaded", i);
-        } else {
-            ESP_LOGW(TAG, "Sensor %d settings failed: %s", i, esp_err_to_name(ret));
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
+        ESP_LOGI(TAG, "  Sensor %d ready", i);
+        LOG_HEAP("after sensor init");
     }
-    LOG_HEAP("after Phase 1.5");
 
-    // ========== PHASE 2: Set up display timers ==========
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 2: Setting Up Display Timers");
+    ESP_LOGI(TAG, "  All sensors initialized!");
     ESP_LOGI(TAG, "========================================");
-    s_do_refresh = true;
 
+    // ========== Set up display timers ==========
     s_sensor_timer = xTimerCreate(
         "sensor_update",
         pdMS_TO_TICKS(SENSOR_UPDATE_MS),
@@ -569,31 +573,9 @@ void app_main(void)
     );
     xTimerStart(s_refresh_timer, 0);
 
-    ESP_LOGI(TAG, "Display will refresh every %d seconds", DISPLAY_REFRESH_MS / 1000);
-    LOG_HEAP("after Phase 2");
-
-#if DOWNLOAD_HISTORY_ON_STARTUP
-    // ========== PHASE 3: Download historical data (then start periodic BLE) ==========
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Phase 3: Starting History Sync");
-    ESP_LOGI(TAG, "========================================");
-
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    xTaskCreatePinnedToCore(
-        history_download_task,
-        "history_dl",
-        4096,  // Reduced from 8192 to avoid heap fragmentation
-        NULL,
-        4,
-        &s_history_task,
-        CORE_BLE
-    );
-#else
+    // Start periodic BLE reading
     ESP_LOGI(TAG, "Starting periodic BLE reading...");
     inkbird_ble_start();
-#endif
 
     ESP_LOGI(TAG, "Initialization complete!");
     ESP_LOGI(TAG, "Tap a sensor tile to view its detail page with history chart.");

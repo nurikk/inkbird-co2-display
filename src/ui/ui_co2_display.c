@@ -179,7 +179,9 @@ static lv_obj_t *s_chart_labels[SENSOR_COUNT];
 static lv_chart_series_t *s_chart_series[SENSOR_COUNT];
 static int32_t s_chart_data[SENSOR_COUNT][SENSOR_HISTORY_SIZE];
 static bool s_ui_created = false;
+static bool s_loading_complete = false;  // Set to true when ready to show main screen
 static lv_obj_t *s_loading_status_label = NULL;
+static char s_pending_status[32] = "";   // Thread-safe status buffer (set from any task)
 
 static lv_obj_t *s_detail_name_label = NULL;
 static lv_obj_t *s_detail_co2_card = NULL;
@@ -830,7 +832,12 @@ static void update_detail_screen(int sensor_idx)
     if (dl_state == DETAIL_HISTORY_IN_PROGRESS && s_loading_progress_label != NULL) {
         uint8_t progress = detail_history_get_progress();
         char progress_str[24];
-        snprintf(progress_str, sizeof(progress_str), "Syncing %d%%", progress);
+        if (progress == 0) {
+            // BLE stack is being prepared or waiting for record count
+            snprintf(progress_str, sizeof(progress_str), "Preparing...");
+        } else {
+            snprintf(progress_str, sizeof(progress_str), "Syncing %d%%", progress);
+        }
         lv_label_set_text(s_loading_progress_label, progress_str);
     }
 
@@ -1656,10 +1663,19 @@ void ui_co2_display_loading(void)
 
 void ui_co2_display_set_status(const char *status)
 {
-    if (s_loading_status_label != NULL) {
-        lv_label_set_text(s_loading_status_label, status);
-        lv_obj_align(s_loading_status_label, LV_ALIGN_CENTER, 0, 14);
+    // Thread-safe: just copy to buffer, display task will apply it
+    if (status != NULL) {
+        strncpy(s_pending_status, status, sizeof(s_pending_status) - 1);
+        s_pending_status[sizeof(s_pending_status) - 1] = '\0';
+    } else {
+        s_pending_status[0] = '\0';
     }
+}
+
+void ui_co2_display_loading_complete(void)
+{
+    s_loading_complete = true;
+    ESP_LOGI(TAG, "Loading complete, main screen will be shown");
 }
 
 void ui_co2_display_update(void)
@@ -1671,7 +1687,18 @@ void ui_co2_display_update(void)
         s_touch_status_logged = true;
     }
 
+    // Apply pending status text (thread-safe handoff from other tasks)
+    if (s_pending_status[0] != '\0' && s_loading_status_label != NULL && !s_ui_created) {
+        lv_label_set_text(s_loading_status_label, s_pending_status);
+        lv_obj_align(s_loading_status_label, LV_ALIGN_CENTER, 0, 14);
+        s_pending_status[0] = '\0';  // Clear pending status
+    }
+
+    // Don't create main UI until loading is complete
     if (!s_ui_created) {
+        if (!s_loading_complete) {
+            return;  // Stay on loading screen
+        }
         create_ui();
     }
 
@@ -1736,7 +1763,8 @@ void ui_co2_display_update(void)
         lv_obj_set_style_border_color(s_tiles[i], status_col, 0);
         lv_chart_set_series_color(s_chart[i], s_chart_series[i], status_col);
 
-        if (sensor->connected) {
+        // Center area: only show CO2 value or "---" placeholder
+        if (sensor->connected && sensor->current.co2_ppm > 0) {
             lv_obj_set_style_text_color(s_co2_labels[i], status_col, 0);
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
@@ -1760,26 +1788,24 @@ void ui_co2_display_update(void)
             char hum_str[16];
             snprintf(hum_str, sizeof(hum_str), "%d%%", hum_whole);
             lv_label_set_text(s_hum_labels[i], hum_str);
-        } else if (sensor->status_text[0] != '\0') {
-            lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
-            lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
-            lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
-            lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
-            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_14, 0);
-            lv_label_set_text(s_co2_labels[i], sensor->status_text);
-            lv_label_set_text(s_temp_labels[i], "");
-            lv_label_set_text(s_hum_labels[i], "");
         } else {
+            // No data yet - show placeholder
             lv_obj_set_style_text_color(s_co2_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_48, 0);
             lv_label_set_text(s_co2_labels[i], "---");
-            lv_label_set_text(s_temp_labels[i], "--.-C");
-            lv_label_set_text(s_hum_labels[i], "--%");
+            lv_label_set_text(s_temp_labels[i], "");
+            lv_label_set_text(s_hum_labels[i], "");
         }
 
+        // Bottom area: chart takes priority once loaded, status only for errors/setup
+        uint8_t history_count = 0;
+        const int16_t *history = sensor_data_get_co2_history_filtered(i, 60, &history_count);
+        bool has_chart_data = (history_count > 1 && history != NULL);
+
+        // Priority 1: Syncing progress (transient state during download)
         if (sensor->downloading) {
             char sync_str[24];
             uint16_t expected = 0, received = 0;
@@ -1791,7 +1817,8 @@ void ui_co2_display_update(void)
                 }
                 snprintf(sync_str, sizeof(sync_str), "Syncing %d%%", percent);
             } else {
-                snprintf(sync_str, sizeof(sync_str), "Syncing...");
+                // BLE connecting or waiting for record count from sensor
+                snprintf(sync_str, sizeof(sync_str), "Preparing...");
             }
             lv_label_set_text(s_chart_labels[i], sync_str);
             lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
@@ -1799,20 +1826,29 @@ void ui_co2_display_update(void)
             continue;
         }
 
-        uint8_t history_count = 0;
-        const int16_t *history = sensor_data_get_co2_history_filtered(i, 60, &history_count);
-        if (history_count > 1 && history != NULL) {
+        // Priority 2: Show chart if data available (don't override with status)
+        if (has_chart_data) {
             for (int j = 0; j < SENSOR_HISTORY_SIZE; j++) {
                 s_chart_data[i][j] = history[j];
             }
             lv_chart_set_series_values(s_chart[i], s_chart_series[i], s_chart_data[i], SENSOR_HISTORY_SIZE);
             lv_obj_add_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_label_set_text(s_chart_labels[i], "No data");
+            continue;
+        }
+
+        // Priority 3: Activity status (only when no chart - for setup/errors)
+        if (sensor->activity_status[0] != '\0') {
+            lv_label_set_text(s_chart_labels[i], sensor->activity_status);
             lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
         }
+
+        // Priority 4: "No data" fallback
+        lv_label_set_text(s_chart_labels[i], "No data");
+        lv_obj_clear_flag(s_chart_labels[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_chart[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 

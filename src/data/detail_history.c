@@ -64,10 +64,26 @@ static void download_task(void *arg)
 
     ESP_LOGI(TAG, "Download task started for sensor %d", sensor_idx);
 
+    // Stop periodic BLE reading to avoid conflicts during history download
+    // This must happen in the download task (not caller) to avoid blocking UI
+    ESP_LOGI(TAG, "Stopping periodic BLE reading for history download...");
+    inkbird_ble_stop();
+    vTaskDelay(pdMS_TO_TICKS(3000));  // Allow time for BLE stack to fully settle
+
+    // Check if cancelled during BLE stop wait
+    if (s_cancel_requested) {
+        ESP_LOGI(TAG, "Download cancelled during BLE stop");
+        s_state = DETAIL_HISTORY_CANCELLED;
+        inkbird_ble_start();
+        s_download_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
     // Log heap info (buffer is statically allocated, no malloc needed)
     size_t free_heap = esp_get_free_heap_size();
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "Heap: free=%u, largest_block=%u (static buffer: %u bytes for %d records)",
+    ESP_LOGI(TAG, "Heap after BLE stop: free=%u, largest_block=%u (static buffer: %u bytes for %d records)",
              (unsigned)free_heap, (unsigned)largest_block,
              (unsigned)(sizeof(inkbird_history_record_t) * DOWNLOAD_BUFFER_SIZE), DOWNLOAD_BUFFER_SIZE);
 
@@ -177,16 +193,6 @@ bool detail_history_start_download(uint8_t sensor_idx)
 
     // Clear previous data
     detail_history_clear();
-
-    // Stop periodic BLE reading to avoid conflicts during history download
-    // Must give the BLE stack time to fully close connections and clean up state
-    ESP_LOGI(TAG, "Stopping periodic BLE reading for history download...");
-    inkbird_ble_stop();
-    vTaskDelay(pdMS_TO_TICKS(3000));  // Allow time for BLE stack to fully settle and free resources
-
-    // Log heap after BLE stop
-    size_t free_heap_after_stop = esp_get_free_heap_size();
-    ESP_LOGI(TAG, "Heap after BLE stop: %u bytes", (unsigned)free_heap_after_stop);
 
     s_sensor_idx = sensor_idx;
     s_state = DETAIL_HISTORY_IN_PROGRESS;

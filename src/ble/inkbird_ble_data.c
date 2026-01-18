@@ -81,7 +81,7 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
             // Normal mode: send real-time data request after pairing
             if (peer != NULL && peer->cmd_char_val_handle != 0 &&
                 s_history_state == INKBIRD_HISTORY_IDLE && !s_settings_request_mode) {
-                sensor_data_set_status(sensor_idx, "Requesting...");
+                sensor_data_set_activity_status(sensor_idx, "Requesting...");
 
                 // Send real-time data request (0x09) first - this is what we need
                 ESP_LOGI(TAG, "Sending real-time data request...");
@@ -225,7 +225,7 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         ESP_LOGI(TAG, "  Humidity: %.1f%%", reading->humidity / 10.0f);
         ESP_LOGI(TAG, "  Pressure: %u hPa", reading->pressure);
 
-        sensor_data_set_status(sensor_idx, NULL);  // Clear status on success
+        sensor_data_set_activity_status(sensor_idx, NULL);  // Clear status on success
         return true;
     }
 

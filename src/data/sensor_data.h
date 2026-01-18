@@ -67,7 +67,7 @@ typedef struct {
     bool downloading;                           // True while downloading history
     uint16_t download_expected;                 // Expected record count for download
     uint16_t download_received;                 // Received record count for download
-    char status_text[24];                       // Current status (e.g., "Connecting...", "Reading...")
+    char activity_status[24];                   // Activity status shown in chart area (e.g., "Connecting...", "Syncing...")
 } sensor_data_t;
 
 /**
@@ -238,12 +238,20 @@ const int16_t *sensor_data_get_pres_history(uint8_t index, uint8_t *out_count);
 void sensor_data_set_name(uint8_t index, const char *name);
 
 /**
- * @brief Set sensor status text
+ * @brief Set sensor activity status (displayed in chart area)
  *
  * @param index Sensor index (0-3)
- * @param status Status text to display (max 23 chars)
+ * @param status Activity status text to display (max 23 chars), NULL to clear
  */
-void sensor_data_set_status(uint8_t index, const char *status);
+void sensor_data_set_activity_status(uint8_t index, const char *status);
+
+/**
+ * @brief Get sensor activity status
+ *
+ * @param index Sensor index (0-3)
+ * @return Activity status string, or empty string if none
+ */
+const char *sensor_data_get_activity_status(uint8_t index);
 
 #ifdef __cplusplus
 }

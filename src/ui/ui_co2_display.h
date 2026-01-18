@@ -30,6 +30,14 @@ void ui_co2_display_loading(void);
  */
 void ui_co2_display_set_status(const char *status);
 
+/**
+ * @brief Signal that loading is complete and main screen can be shown
+ *
+ * Call this after BLE initialization and sensor discovery are complete.
+ * The loading screen will remain visible until this is called.
+ */
+void ui_co2_display_loading_complete(void);
+
 void ui_co2_display_force_refresh(void);
 
 /**

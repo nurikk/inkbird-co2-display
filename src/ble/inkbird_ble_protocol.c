@@ -337,7 +337,7 @@ static void inkbird_on_connect(inkbird_peer_t *peer, uint16_t conn_handle)
     ESP_LOGI(TAG, "Sensor %d (%s) connected, discovering services...",
              peer->sensor_idx, s_active_sensors[peer->sensor_idx].name);
 
-    sensor_data_set_status(peer->sensor_idx, "Discovering...");
+    sensor_data_set_activity_status(peer->sensor_idx, "Discovering...");
 
     // Start service discovery
     inkbird_start_service_discovery(peer);
@@ -427,7 +427,7 @@ int inkbird_on_disc_complete(uint16_t conn_handle,
 
 static void inkbird_discover_chars(inkbird_peer_t *peer)
 {
-    sensor_data_set_status(peer->sensor_idx, "Chars...");
+    sensor_data_set_activity_status(peer->sensor_idx, "Scanning...");
 
     int rc = ble_gattc_disc_all_chrs(peer->conn_handle,
                                       peer->service_start_handle,
@@ -574,7 +574,7 @@ static void inkbird_enable_notifications(inkbird_peer_t *peer)
         ESP_LOGW(TAG, "CCCD not found, guessing handle=%d", cccd);
     }
 
-    sensor_data_set_status(peer->sensor_idx, "Subscribing...");
+    sensor_data_set_activity_status(peer->sensor_idx, "Subscribing...");
     ESP_LOGI(TAG, "Enabling notifications on CCCD handle=%d", cccd);
 
     int rc = ble_gattc_write_flat(peer->conn_handle,
@@ -641,7 +641,7 @@ static void inkbird_send_pairing(inkbird_peer_t *peer)
         return;
     }
 
-    sensor_data_set_status(peer->sensor_idx, "Pairing...");
+    sensor_data_set_activity_status(peer->sensor_idx, "Pairing...");
     ESP_LOGI(TAG, "Sending pairing command to sensor %d", peer->sensor_idx);
 
     int rc = ble_gattc_write_flat(peer->conn_handle,
