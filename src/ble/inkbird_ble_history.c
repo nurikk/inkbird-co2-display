@@ -86,13 +86,15 @@ bool inkbird_parse_history_record(const uint8_t *data)
     // Parse CO2 first to validate
     uint16_t co2_ppm = ((uint16_t)data[0] << 8) | data[1];
 
+    // Count ALL non-empty records for progress tracking (before validation)
+    // This ensures progress shows accurate download percentage even if many
+    // records have invalid CO2 values (zeros, stale data, out of range)
+    s_history_received_count++;
+
     // Skip records with invalid CO2 values (200-10000 ppm is valid range)
     if (co2_ppm < 200 || co2_ppm > 10000) {
         return false;
     }
-
-    // Count this as a valid received record
-    s_history_received_count++;
 
     // Downsampling: only store every Nth record
     s_history_downsample_counter++;
@@ -422,7 +424,7 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  History Download Complete");
     ESP_LOGI(TAG, "  Total records from sensor: %u", s_history_expected_count);
-    ESP_LOGI(TAG, "  Valid records received: %u", s_history_received_count);
+    ESP_LOGI(TAG, "  Records received (for progress): %u", s_history_received_count);
     ESP_LOGI(TAG, "  Records in output buffer: %u (NEWEST)", s_history_stored_count);
     ESP_LOGI(TAG, "  State: %d", s_history_state);
     ESP_LOGI(TAG, "========================================");
