@@ -1,3 +1,4 @@
 .pio
 managed_components
 doc/3.5inch_ESP32-3248S035
+.cache
