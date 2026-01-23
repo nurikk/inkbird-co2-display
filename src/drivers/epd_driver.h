@@ -41,13 +41,29 @@ extern "C" {
 #define PANEL_BL_ACTIVE_LOW 0
 #endif
 
+// Pin definitions - configured via platformio.ini build_flags
+// Defaults for ESP32 (original board) if not defined
+#ifndef EPD_PIN_MOSI
 #define EPD_PIN_MOSI    13
+#endif
+#ifndef EPD_PIN_MISO
 #define EPD_PIN_MISO    12
+#endif
+#ifndef EPD_PIN_SCK
 #define EPD_PIN_SCK     14
+#endif
+#ifndef EPD_PIN_CS
 #define EPD_PIN_CS      15
+#endif
+#ifndef EPD_PIN_DC
 #define EPD_PIN_DC      2
+#endif
+#ifndef EPD_PIN_RST
 #define EPD_PIN_RST     -1
+#endif
+#ifndef EPD_PIN_BL
 #define EPD_PIN_BL      27
+#endif
 
 /**
  * @brief Initialize the TFT display hardware

@@ -10,11 +10,23 @@
 extern "C" {
 #endif
 
+// Pin definitions - configured via platformio.ini build_flags
+// Defaults for ESP32 (original board) if not defined
+#ifndef XPT2046_PIN_CLK
 #define XPT2046_PIN_CLK     14
+#endif
+#ifndef XPT2046_PIN_CS
 #define XPT2046_PIN_CS      33
+#endif
+#ifndef XPT2046_PIN_DIN
 #define XPT2046_PIN_DIN     13
+#endif
+#ifndef XPT2046_PIN_DOUT
 #define XPT2046_PIN_DOUT    12
+#endif
+#ifndef XPT2046_PIN_IRQ
 #define XPT2046_PIN_IRQ     36
+#endif
 
 typedef struct {
     uint16_t x;

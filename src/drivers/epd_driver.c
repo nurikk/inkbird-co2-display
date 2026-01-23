@@ -72,11 +72,63 @@ typedef struct {
     uint8_t data_bytes;
     uint16_t delay_ms;
     bool delay_only;
-} st7796_init_cmd_t;
+} lcd_init_cmd_t;
+
+#if CONFIG_IDF_TARGET_ESP32S3
+// ILI9341 initialization for 2.8" TFT on ESP32-S3 expansion board
+static esp_err_t panel_init_ili9341(esp_lcd_panel_io_handle_t io)
+{
+    static const lcd_init_cmd_t init_cmds[] = {
+        { .cmd = 0x01, .delay_ms = 150 },                                    // Software reset
+        { .cmd = 0x11, .delay_ms = 255 },                                    // Sleep out
+        { .cmd = 0xCF, .data = { 0x00, 0xC1, 0x30 }, .data_bytes = 3 },      // Power control B
+        { .cmd = 0xED, .data = { 0x64, 0x03, 0x12, 0x81 }, .data_bytes = 4 },// Power on sequence
+        { .cmd = 0xE8, .data = { 0x85, 0x00, 0x78 }, .data_bytes = 3 },      // Driver timing A
+        { .cmd = 0xCB, .data = { 0x39, 0x2C, 0x00, 0x34, 0x02 }, .data_bytes = 5 }, // Power control A
+        { .cmd = 0xF7, .data = { 0x20 }, .data_bytes = 1 },                  // Pump ratio control
+        { .cmd = 0xEA, .data = { 0x00, 0x00 }, .data_bytes = 2 },            // Driver timing B
+        { .cmd = 0xC0, .data = { 0x23 }, .data_bytes = 1 },                  // Power control 1
+        { .cmd = 0xC1, .data = { 0x10 }, .data_bytes = 1 },                  // Power control 2
+        { .cmd = 0xC5, .data = { 0x3E, 0x28 }, .data_bytes = 2 },            // VCOM control 1
+        { .cmd = 0xC7, .data = { 0x86 }, .data_bytes = 1 },                  // VCOM control 2
+        { .cmd = 0x36, .data = { 0xE0 }, .data_bytes = 1 },                  // Memory access (landscape, RGB order)
+        { .cmd = 0x3A, .data = { 0x55 }, .data_bytes = 1 },                  // Pixel format 16-bit
+        { .cmd = 0xB1, .data = { 0x00, 0x18 }, .data_bytes = 2 },            // Frame rate
+        { .cmd = 0xB6, .data = { 0x08, 0x82, 0x27 }, .data_bytes = 3 },      // Display function
+        { .cmd = 0xF2, .data = { 0x00 }, .data_bytes = 1 },                  // 3Gamma off
+        { .cmd = 0x26, .data = { 0x01 }, .data_bytes = 1 },                  // Gamma curve 1
+        { .cmd = 0xE0, .data = { 0x0F, 0x31, 0x2B, 0x0C, 0x0E, 0x08, 0x4E, 0xF1, 0x37, 0x07, 0x10, 0x03, 0x0E, 0x09, 0x00 }, .data_bytes = 15 },
+        { .cmd = 0xE1, .data = { 0x00, 0x0E, 0x14, 0x03, 0x11, 0x07, 0x31, 0xC1, 0x48, 0x08, 0x0F, 0x0C, 0x31, 0x36, 0x0F }, .data_bytes = 15 },
+        { .cmd = 0x29, .delay_ms = 100 },                                    // Display on
+    };
+
+    for (size_t i = 0; i < sizeof(init_cmds) / sizeof(init_cmds[0]); i++) {
+        const lcd_init_cmd_t *cmd = &init_cmds[i];
+
+        if (!cmd->delay_only) {
+            esp_err_t ret = esp_lcd_panel_io_tx_param(io,
+                                                     cmd->cmd,
+                                                     cmd->data_bytes ? cmd->data : NULL,
+                                                     cmd->data_bytes);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "ILI9341 init 0x%02X failed: %s", cmd->cmd, esp_err_to_name(ret));
+                return ret;
+            }
+        }
+
+        if (cmd->delay_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(cmd->delay_ms));
+        }
+    }
+
+    ESP_LOGI(TAG, "ILI9341 initialization complete");
+    return ESP_OK;
+}
+#endif
 
 static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
 {
-    static const st7796_init_cmd_t init_cmds[] = {
+    static const lcd_init_cmd_t init_cmds[] = {
         { .delay_ms = 120, .delay_only = true },
         { .cmd = 0x01, .delay_ms = 120 },
         { .cmd = 0x11, .delay_ms = 120 },
@@ -102,7 +154,7 @@ static esp_err_t panel_init_st7796(esp_lcd_panel_io_handle_t io)
     };
 
     for (size_t i = 0; i < sizeof(init_cmds) / sizeof(init_cmds[0]); i++) {
-        const st7796_init_cmd_t *cmd = &init_cmds[i];
+        const lcd_init_cmd_t *cmd = &init_cmds[i];
 
         if (!cmd->delay_only) {
             esp_err_t ret = esp_lcd_panel_io_tx_param(io,
@@ -162,7 +214,11 @@ esp_err_t epd_init(void)
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel_handle), TAG, "Panel reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel_handle), TAG, "Panel ESP init failed");
+#if CONFIG_IDF_TARGET_ESP32S3
+    ESP_RETURN_ON_ERROR(panel_init_ili9341(s_io_handle), TAG, "ILI9341 init failed");
+#else
     ESP_RETURN_ON_ERROR(panel_init_st7796(s_io_handle), TAG, "ST7796 init failed");
+#endif
     if (PANEL_INVERT_COLOR) {
         ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_panel_handle, true), TAG, "Panel invert failed");
     }

@@ -323,8 +323,14 @@ esp_err_t inkbird_ble_init(void)
 
     // Disable brownout detector during RF calibration
     ESP_LOGI(TAG, "Free heap before BLE: %lu bytes", esp_get_free_heap_size());
+#if CONFIG_IDF_TARGET_ESP32S3
+    // ESP32-S3 uses different brownout registers - disable via RTC_CNTL
+    ESP_LOGW(TAG, "Disabling brownout detector for RF calibration (S3)...");
+    REG_CLR_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA);
+#else
     ESP_LOGW(TAG, "Disabling brownout detector for RF calibration...");
     WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+#endif
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Initialize NimBLE port

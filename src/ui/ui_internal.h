@@ -19,8 +19,44 @@
 // Display Configuration
 // ============================================================================
 
+#ifdef UI_WIDTH
+#define UI_DISPLAY_WIDTH    UI_WIDTH
+#else
 #define UI_DISPLAY_WIDTH    480
+#endif
+
+#ifdef UI_HEIGHT
+#define UI_DISPLAY_HEIGHT   UI_HEIGHT
+#else
 #define UI_DISPLAY_HEIGHT   320
+#endif
+
+// ============================================================================
+// Scaling System - Scale layout values based on display width
+// ============================================================================
+
+// Reference design width (original ESP32 board with 3.2" display)
+#define UI_REF_WIDTH        480
+
+// Scale factor as integer percentage (e.g., 67 for 320/480)
+#define UI_SCALE_PERCENT    ((UI_DISPLAY_WIDTH * 100) / UI_REF_WIDTH)
+
+// Scale a value from reference design to current display
+// Uses integer math: (val * scale%) / 100, with minimum of 1
+#define UI_SCALE(val)       (((val) * UI_SCALE_PERCENT + 50) / 100)
+
+// Font selection based on display width
+// Small displays (< 400px): use smaller fonts
+// Large displays (>= 400px): use larger fonts
+#if UI_DISPLAY_WIDTH < 400
+#define UI_FONT_CO2         &lv_font_montserrat_28
+#define UI_FONT_LABEL       &lv_font_montserrat_12
+#define UI_FONT_SMALL       &lv_font_montserrat_12
+#else
+#define UI_FONT_CO2         &lv_font_montserrat_48
+#define UI_FONT_LABEL       &lv_font_montserrat_14
+#define UI_FONT_SMALL       &lv_font_montserrat_12
+#endif
 
 // ============================================================================
 // Layout Constants - Main Screen
@@ -28,65 +64,65 @@
 
 #define GRID_COLS           2
 #define GRID_ROWS           2
-#define GRID_GAP            6
-#define TILE_PAD            12
+#define GRID_GAP            UI_SCALE(6)
+#define TILE_PAD            UI_SCALE(12)
 #define TILE_BORDER_WIDTH   2
-#define TILE_BORDER_RADIUS  12
-#define CHART_HEIGHT        42
-#define HEADER_HEIGHT       20
+#define TILE_BORDER_RADIUS  UI_SCALE(12)
+#define CHART_HEIGHT        UI_SCALE(42)
+#define HEADER_HEIGHT       UI_SCALE(20)
 #define CHART_MIN_PPM       400
 #define CHART_MAX_PPM       2000
 
-#define TILE_CHART_PAD          4
-#define TILE_CHART_RADIUS       6
+#define TILE_CHART_PAD          UI_SCALE(4)
+#define TILE_CHART_RADIUS       UI_SCALE(6)
 #define TILE_CHART_BG           0x0D1B2A
 #define TILE_CHART_GRID_COLOR   0x2A3F5F
-#define TILE_UNIT_SPACING       6
-#define TILE_STATUS_PAD_H       6
-#define TILE_STATUS_PAD_V       2
-#define TILE_STATUS_RADIUS      4
-#define TILE_STATUS_Y_OFFSET    2
-#define TILE_CO2_Y_OFFSET       15
-#define TILE_NAME_WIDTH_MARGIN  50
+#define TILE_UNIT_SPACING       UI_SCALE(6)
+#define TILE_STATUS_PAD_H       UI_SCALE(6)
+#define TILE_STATUS_PAD_V       UI_SCALE(2)
+#define TILE_STATUS_RADIUS      UI_SCALE(4)
+#define TILE_STATUS_Y_OFFSET    UI_SCALE(2)
+#define TILE_CO2_Y_OFFSET       UI_SCALE(15)
+#define TILE_NAME_WIDTH_MARGIN  UI_SCALE(50)
 
 // ============================================================================
 // Layout Constants - Detail Screen
 // ============================================================================
 
-#define DETAIL_PAD              10
-#define DETAIL_BACK_BTN_X       16
-#define DETAIL_BACK_BTN_Y       10
-#define DETAIL_TITLE_Y          8
-#define DETAIL_CARDS_Y          36
-#define DETAIL_CARD_HEIGHT      52
-#define DETAIL_CARD_WIDTH       108
-#define DETAIL_CARD_GAP         8
-#define DETAIL_CARD_RADIUS      6
-#define DETAIL_CARD_VALUE_X     6
-#define DETAIL_CARD_VALUE_Y     12
-#define DETAIL_CARD_LABEL_X     6
-#define DETAIL_CARD_LABEL_Y_OFFSET  18
-#define DETAIL_CARD_BAR_X       4
-#define DETAIL_CARD_BAR_Y       3
-#define DETAIL_CARD_BAR_MARGIN  8
-#define DETAIL_CARD_BAR_HEIGHT  3
+#define DETAIL_PAD              UI_SCALE(10)
+#define DETAIL_BACK_BTN_X       UI_SCALE(16)
+#define DETAIL_BACK_BTN_Y       UI_SCALE(10)
+#define DETAIL_TITLE_Y          UI_SCALE(8)
+#define DETAIL_CARDS_Y          UI_SCALE(36)
+#define DETAIL_CARD_HEIGHT      UI_SCALE(52)
+#define DETAIL_CARD_WIDTH       UI_SCALE(108)
+#define DETAIL_CARD_GAP         UI_SCALE(8)
+#define DETAIL_CARD_RADIUS      UI_SCALE(6)
+#define DETAIL_CARD_VALUE_X     UI_SCALE(6)
+#define DETAIL_CARD_VALUE_Y     UI_SCALE(12)
+#define DETAIL_CARD_LABEL_X     UI_SCALE(6)
+#define DETAIL_CARD_LABEL_Y_OFFSET  UI_SCALE(18)
+#define DETAIL_CARD_BAR_X       UI_SCALE(4)
+#define DETAIL_CARD_BAR_Y       UI_SCALE(3)
+#define DETAIL_CARD_BAR_MARGIN  UI_SCALE(8)
+#define DETAIL_CARD_BAR_HEIGHT  UI_SCALE(3)
 #define DETAIL_CARD_BAR_RADIUS  1
 
-#define DETAIL_CHART_TOP        92
-#define DETAIL_CHART_MARGIN_X   12
-#define DETAIL_CHART_MARGIN_BOTTOM  8
-#define DETAIL_CHART_RADIUS     8
+#define DETAIL_CHART_TOP        UI_SCALE(92)
+#define DETAIL_CHART_MARGIN_X   UI_SCALE(12)
+#define DETAIL_CHART_MARGIN_BOTTOM  UI_SCALE(8)
+#define DETAIL_CHART_RADIUS     UI_SCALE(8)
 
-#define PLOT_MARGIN_TOP         8
-#define PLOT_MARGIN_BOTTOM      20
-#define PLOT_MARGIN_LEFT        32
-#define PLOT_MARGIN_RIGHT       28
-#define PLOT_Y_LABEL_X          2
-#define PLOT_Y_LABEL_OFFSET     6
-#define PLOT_Y_LABEL_RIGHT_OFFSET   4
-#define PLOT_X_LABEL_Y_OFFSET   4
-#define PLOT_X_LABEL_MID_OFFSET 15
-#define PLOT_X_LABEL_END_OFFSET 24
+#define PLOT_MARGIN_TOP         UI_SCALE(8)
+#define PLOT_MARGIN_BOTTOM      UI_SCALE(20)
+#define PLOT_MARGIN_LEFT        UI_SCALE(32)
+#define PLOT_MARGIN_RIGHT       UI_SCALE(28)
+#define PLOT_Y_LABEL_X          UI_SCALE(2)
+#define PLOT_Y_LABEL_OFFSET     UI_SCALE(6)
+#define PLOT_Y_LABEL_RIGHT_OFFSET   UI_SCALE(4)
+#define PLOT_X_LABEL_Y_OFFSET   UI_SCALE(4)
+#define PLOT_X_LABEL_MID_OFFSET UI_SCALE(15)
+#define PLOT_X_LABEL_END_OFFSET UI_SCALE(24)
 #define CHART_LINE_WIDTH        2
 #define CHART_DIV_LINES         4
 
@@ -94,10 +130,10 @@
 // Layout Constants - Settings Screen
 // ============================================================================
 
-#define SETTINGS_COL1_X     12
-#define SETTINGS_COL2_X     248
-#define SETTINGS_LABEL_W    100
-#define SETTINGS_VALUE_X    112
+#define SETTINGS_COL1_X     UI_SCALE(12)
+#define SETTINGS_COL2_X     UI_SCALE(248)
+#define SETTINGS_LABEL_W    UI_SCALE(100)
+#define SETTINGS_VALUE_X    UI_SCALE(112)
 
 // ============================================================================
 // Chart Data Range Constants

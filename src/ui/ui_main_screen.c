@@ -81,7 +81,7 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
     lv_obj_t *name = lv_label_create(tile);
     lv_obj_set_style_text_color(name, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(name, UI_FONT_LABEL, 0);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(name, tile_w - (TILE_PAD * 2) - TILE_NAME_WIDTH_MARGIN);
     lv_label_set_text(name, "Sensor");
@@ -91,7 +91,7 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
     lv_obj_t *status = lv_label_create(tile);
     lv_label_set_text(status, "---");
     lv_obj_set_style_text_color(status, lv_color_hex(COLOR_TILE_BG), 0);
-    lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(status, UI_FONT_SMALL, 0);
     lv_obj_set_style_bg_color(status, lv_color_hex(COLOR_OFFLINE), 0);
     lv_obj_set_style_bg_opa(status, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(status, TILE_STATUS_RADIUS, 0);
@@ -104,28 +104,28 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
     lv_obj_t *co2 = lv_label_create(tile);
     lv_obj_set_style_text_color(co2, lv_color_hex(COLOR_TEXT_PRIMARY), 0);
-    lv_obj_set_style_text_font(co2, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(co2, UI_FONT_CO2, 0);
     lv_label_set_text(co2, "---");
     lv_obj_align(co2, LV_ALIGN_CENTER, 0, -TILE_CO2_Y_OFFSET);
     s_co2_labels[index] = co2;
 
     lv_obj_t *unit = lv_label_create(tile);
     lv_obj_set_style_text_color(unit, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(unit, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(unit, UI_FONT_SMALL, 0);
     lv_label_set_text(unit, "ppm");
     lv_obj_align_to(unit, co2, LV_ALIGN_OUT_BOTTOM_MID, 0, TILE_UNIT_SPACING);
     s_unit_labels[index] = unit;
 
     lv_obj_t *temp = lv_label_create(tile);
     lv_obj_set_style_text_color(temp, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(temp, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(temp, UI_FONT_LABEL, 0);
     lv_label_set_text(temp, "--.-C");
     lv_obj_align(temp, LV_ALIGN_BOTTOM_LEFT, 0, -(CHART_HEIGHT + TILE_UNIT_SPACING));
     s_temp_labels[index] = temp;
 
     lv_obj_t *hum = lv_label_create(tile);
     lv_obj_set_style_text_color(hum, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(hum, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(hum, UI_FONT_LABEL, 0);
     lv_label_set_text(hum, "--%");
     lv_obj_align(hum, LV_ALIGN_BOTTOM_RIGHT, 0, -(CHART_HEIGHT + TILE_UNIT_SPACING));
     s_hum_labels[index] = hum;
@@ -165,7 +165,7 @@ static void create_tile(uint8_t index, int tile_x, int tile_y, int tile_w, int t
 
     lv_obj_t *chart_label = lv_label_create(tile);
     lv_obj_set_style_text_color(chart_label, lv_color_hex(COLOR_TEXT_MUTED), 0);
-    lv_obj_set_style_text_font(chart_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(chart_label, UI_FONT_SMALL, 0);
     lv_label_set_text(chart_label, "No history");
     lv_obj_align(chart_label, LV_ALIGN_BOTTOM_MID, 0, -5);
     s_chart_labels[index] = chart_label;
@@ -250,7 +250,7 @@ void ui_main_screen_update(void)
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
             lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_TEXT_MUTED), 0);
-            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_48, 0);
+            lv_obj_set_style_text_font(s_co2_labels[i], UI_FONT_CO2, 0);
 
             char co2_str[16];
             snprintf(co2_str, sizeof(co2_str), "%u", sensor->current.co2_ppm);
@@ -275,7 +275,7 @@ void ui_main_screen_update(void)
             lv_obj_set_style_text_color(s_unit_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_temp_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
             lv_obj_set_style_text_color(s_hum_labels[i], lv_color_hex(COLOR_OFFLINE), 0);
-            lv_obj_set_style_text_font(s_co2_labels[i], &lv_font_montserrat_48, 0);
+            lv_obj_set_style_text_font(s_co2_labels[i], UI_FONT_CO2, 0);
             lv_label_set_text(s_co2_labels[i], "---");
             lv_label_set_text(s_temp_labels[i], "");
             lv_label_set_text(s_hum_labels[i], "");

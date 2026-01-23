@@ -11,9 +11,18 @@ extern "C" {
 #endif
 
 #define GT911_I2C_ADDR      0x5D
+
+// Pin definitions - configured via platformio.ini build_flags
+// Defaults for ESP32 (original board) if not defined
+#ifndef GT911_PIN_SDA
 #define GT911_PIN_SDA       33
+#endif
+#ifndef GT911_PIN_SCL
 #define GT911_PIN_SCL       32
+#endif
+#ifndef GT911_PIN_INT
 #define GT911_PIN_INT       36
+#endif
 
 typedef struct {
     uint16_t x;
