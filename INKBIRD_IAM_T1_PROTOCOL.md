@@ -350,44 +350,45 @@ Response length: minimum 2 hex characters (1 byte).
 
 ### 6.1 Protocol Flow
 
-1. **Start download**: Send `55 AA 07 06 00 0C`
-2. **Receive record count**: 4 hex chars (2 bytes) = number of records
-3. **Receive data stream**: Continuous data packets
-4. **End marker**: `6666` (3 bytes: `66 66 xx`)
-5. **Cancel if needed**: Send `55 AA 07 06 01 0D`
+1. **Connect WITHOUT pairing**: History download requires a fresh BLE connection without sending the pairing command. If you pair first, the sensor starts sending periodic real-time data notifications that interfere with the history data stream.
+2. **Start download**: Send `55 AA 07 06 00 0C`
+3. **Receive record count**: 2 bytes (binary big-endian) = number of records
+4. **Receive data stream**: Continuous raw data packets (no packet headers)
+5. **End marker**: `66 66` detected in stream
+6. **Cancel if needed**: Send `55 AA 07 06 01 0D`
 
 ### 6.2 Response Format
 
 **Initial response (record count):**
-```
-XXXX
-```
-Where XXXX is 4 hex characters representing the number of history records (big-endian).
 
-Example: `00C8` = 200 records
+The first 2 bytes received after sending the history start command contain the record count as a 16-bit big-endian integer (raw binary, NOT ASCII hex).
+
+Example: `0E 56` = 0x0E56 = 3670 records
+
+> **Note**: Earlier documentation incorrectly stated this was "4 hex characters". Testing confirms it is 2 raw bytes in big-endian format.
 
 **Data stream:**
-Records are streamed continuously without the `55AA` header. Each record is 20 hex characters (10 bytes).
+
+Records are streamed continuously as raw bytes without the `55AA` header. Each record is 10 bytes.
 
 **End marker:**
 ```
-6666XX
+66 66
 ```
-The stream ends when `6666` is detected.
+The stream ends when bytes `0x66 0x66` are detected.
 
 ### 6.3 History Record Format
 
-Each record is 20 hex characters (10 bytes):
+Each record is 10 bytes (raw binary):
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0-3 | 4 chars | CO2 | CO2 value in PPM |
-| 4 | 1 char | Temp Unit | 0=Celsius, 1=Fahrenheit |
-| 5 | 1 char | Temp Sign | 0=positive, 1=negative |
-| 6-9 | 4 chars | Temperature | Value / 10.0 |
-| 10-13 | 4 chars | Humidity | Value / 10 (%) |
-| 14-17 | 4 chars | Pressure | hPa value |
-| 18-19 | 2 chars | Time Interval | Minutes offset (0-59) |
+| 0-1 | 2 bytes | CO2 | CO2 value in PPM (big-endian) |
+| 2 | 1 byte | Unit/Sign | Upper nibble: 0=Celsius, 1=Fahrenheit; Lower nibble: 0=positive temp, 1=negative |
+| 3-4 | 2 bytes | Temperature | Value / 10.0 °C (big-endian) |
+| 5-6 | 2 bytes | Humidity | Value / 10.0 % (big-endian) |
+| 7-8 | 2 bytes | Pressure | hPa value (big-endian) |
+| 9 | 1 byte | Time Interval | Minutes since previous record (0-59) |
 
 ### 6.4 Timestamp Reconstruction
 
@@ -400,9 +401,10 @@ History records don't contain absolute timestamps. Timestamps are reconstructed 
 
 ### 6.5 Data Validation
 
-- Expected data length: `record_count * 20` hex characters
-- If received data exceeds expected length, truncate to expected size
-- Empty response (`6666` with count=0): No history data available
+- Expected data length: `record_count * 10` bytes
+- Valid CO2 range: 200-10000 PPM (values outside this range indicate invalid/empty records)
+- Empty records may contain `0xFF` bytes (uninitialized flash memory)
+- Empty response (`66 66` immediately after count of 0): No history data available
 
 ---
 
