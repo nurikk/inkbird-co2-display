@@ -194,7 +194,7 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         }
         ESP_LOGI(TAG, "Parsing real-time data response (cmd=0x01)");
 
-        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+        BLE_MUTEX_LOCK();
         inkbird_reading_t *reading = &s_readings[sensor_idx];
 
         // Temperature (bytes 5-6, with sign in byte 4 lower nibble)
@@ -216,7 +216,7 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         reading->valid = true;
         reading->stale = false;
 
-        xSemaphoreGive(s_ble_mutex);
+        BLE_MUTEX_UNLOCK();
 
         ESP_LOGI(TAG, "=== SENSOR DATA ===");
         ESP_LOGI(TAG, "  Sensor %d [%s]:", sensor_idx, s_active_sensors[sensor_idx].name);
@@ -269,22 +269,24 @@ void inkbird_read_task(void *arg)
             }
 
             // Clear peer list and create a single peer for this sensor
-            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            BLE_MUTEX_LOCK();
             s_peer_count = 0;
-            xSemaphoreGive(s_ble_mutex);
+            BLE_MUTEX_UNLOCK();
             inkbird_peer_t *peer = peer_add(i);
             if (peer == NULL) {
                 ESP_LOGE(TAG, "Failed to create peer for sensor %d", i);
                 continue;
             }
 
-            // Initialize state BEFORE draining semaphore to close race window.
+            // Initialize ALL state BEFORE draining semaphore to close race window.
+            // Reset peer's data_received flag explicitly since this is the definitive check.
             // Even if a stale signal arrives after drain, we verify with peer->data_received.
+            peer->data_received = false;
             s_current_sensor_index = i;
             s_data_received = false;
             s_connected = false;
 
-            // Drain stale semaphore signals (benign race: we check peer->data_received anyway)
+            // Drain stale semaphore signals - safe because peer->data_received is our truth source
             while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
             ESP_LOGI(TAG, "Connecting to sensor %d (%s): %02X:%02X:%02X:%02X:%02X:%02X",
@@ -327,9 +329,9 @@ void inkbird_read_task(void *arg)
         }
 
         // Clear peer list after cycle
-        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+        BLE_MUTEX_LOCK();
         s_peer_count = 0;
-        xSemaphoreGive(s_ble_mutex);
+        BLE_MUTEX_UNLOCK();
 
         // Wait until next read cycle
         if (s_running) {
@@ -340,9 +342,9 @@ void inkbird_read_task(void *arg)
     }
 
     // Cleanup
-    xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+    BLE_MUTEX_LOCK();
     s_peer_count = 0;
-    xSemaphoreGive(s_ble_mutex);
+    BLE_MUTEX_UNLOCK();
     ESP_LOGI(TAG, "Read task exiting");
 
     // Clear task handle before deleting to signal clean exit

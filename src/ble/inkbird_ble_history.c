@@ -243,15 +243,13 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 
             // Calculate downsample rate to fit all data in buffer
             // If sensor has 1500 records and we can only store 200, sample every 8th
-            // Cap at reasonable maximum to ensure we always get meaningful data
-            #define MAX_DOWNSAMPLE_RATE 50  // Never skip more than 50 records at a time
             if (s_history_expected_count > s_history_max_records) {
                 // Add 1 to ensure we don't overflow (round up)
                 s_history_downsample_rate = (s_history_expected_count + s_history_max_records - 1) / s_history_max_records;
                 // Cap the rate to ensure we get meaningful data even with early termination
-                if (s_history_downsample_rate > MAX_DOWNSAMPLE_RATE) {
-                    ESP_LOGW(TAG, "Capping downsample rate from %d to %d", s_history_downsample_rate, MAX_DOWNSAMPLE_RATE);
-                    s_history_downsample_rate = MAX_DOWNSAMPLE_RATE;
+                if (s_history_downsample_rate > INKBIRD_MAX_DOWNSAMPLE_RATE) {
+                    ESP_LOGW(TAG, "Capping downsample rate from %d to %d", s_history_downsample_rate, INKBIRD_MAX_DOWNSAMPLE_RATE);
+                    s_history_downsample_rate = INKBIRD_MAX_DOWNSAMPLE_RATE;
                 }
             } else {
                 s_history_downsample_rate = 1;  // No downsampling needed
@@ -420,7 +418,7 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
     inkbird_start_connect(peer);
 
     // Wait for connection and notification setup
-    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(30000));
+    BaseType_t got_sem = xSemaphoreTake(s_read_complete_sem, pdMS_TO_TICKS(INKBIRD_HISTORY_CONNECT_TIMEOUT_MS));
     bool connected = (peer != NULL && peer->connected);
 
     if (got_sem != pdTRUE || !connected) {
@@ -463,9 +461,10 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         return ret;
     }
 
-    // Wait for history download to complete (timeout: 5 minutes)
-    ESP_LOGI(TAG, "Waiting for history data (timeout: 300s)...");
-    got_sem = xSemaphoreTake(s_history_complete_sem, pdMS_TO_TICKS(300000));
+    // Wait for history download to complete
+    ESP_LOGI(TAG, "Waiting for history data (timeout: %ds)...",
+             INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS / 1000);
+    got_sem = xSemaphoreTake(s_history_complete_sem, pdMS_TO_TICKS(INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS));
 
     if (got_sem != pdTRUE) {
         ESP_LOGW(TAG, "History download timeout");

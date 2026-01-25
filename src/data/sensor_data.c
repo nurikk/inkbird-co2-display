@@ -1,11 +1,40 @@
 /**
  * @file sensor_data.c
  * @brief Sensor data structures and history management
+ *
+ * Thread-safety: This module uses a mutex to protect access to shared
+ * static buffers used for returning history data. The mutex must be
+ * initialized before any other functions are called.
  */
 
 #include <string.h>
 #include <stdio.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+#include "esp_log.h"
+
 #include "sensor_data.h"
+
+static const char *TAG = "sensor_data";
+
+// Mutex for protecting access to shared static buffers
+// This prevents data corruption when history functions are called from multiple tasks
+static SemaphoreHandle_t s_data_mutex = NULL;
+
+// Helper macros for mutex operations with NULL safety
+#define DATA_LOCK() do { \
+    if (s_data_mutex != NULL) { \
+        xSemaphoreTake(s_data_mutex, portMAX_DELAY); \
+    } \
+} while(0)
+
+#define DATA_UNLOCK() do { \
+    if (s_data_mutex != NULL) { \
+        xSemaphoreGive(s_data_mutex); \
+    } \
+} while(0)
 
 // Static sensor data storage
 static sensor_data_t s_sensors[SENSOR_COUNT];
@@ -23,6 +52,16 @@ static uint16_t s_cumulative_minutes[SENSOR_COUNT];
 
 void sensor_data_init(void)
 {
+    // Create mutex for thread-safe access to shared buffers
+    if (s_data_mutex == NULL) {
+        s_data_mutex = xSemaphoreCreateMutex();
+        if (s_data_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create data mutex!");
+        }
+    }
+
+    DATA_LOCK();
+
     for (int i = 0; i < SENSOR_COUNT; i++) {
         memset(&s_sensors[i], 0, sizeof(sensor_data_t));
         s_sensors[i].id = i;
@@ -43,6 +82,8 @@ void sensor_data_init(void)
         s_last_interval[i] = 0;
         s_cumulative_minutes[i] = 0;
     }
+
+    DATA_UNLOCK();
 }
 
 sensor_data_t *sensor_data_get(uint8_t index)
@@ -58,6 +99,8 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
     if (index >= SENSOR_COUNT || reading == NULL) {
         return;
     }
+
+    DATA_LOCK();
 
     sensor_data_t *sensor = &s_sensors[index];
 
@@ -80,6 +123,8 @@ void sensor_data_update(uint8_t index, const sensor_reading_t *reading)
     }
 
     sensor->total_minutes = s_cumulative_minutes[index];
+
+    DATA_UNLOCK();
 }
 
 void sensor_data_add_history(uint8_t index, uint16_t co2_ppm)
@@ -94,6 +139,8 @@ void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
         return;
     }
 
+    DATA_LOCK();
+
     sensor_data_t *sensor = &s_sensors[index];
 
     sensor->co2_history[sensor->history_head] = (int16_t)co2_ppm;
@@ -106,6 +153,8 @@ void sensor_data_add_history_full(uint8_t index, uint16_t co2_ppm,
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         sensor->history_count++;
     }
+
+    DATA_UNLOCK();
 }
 
 void sensor_data_clear_history(uint8_t index)
@@ -113,6 +162,8 @@ void sensor_data_clear_history(uint8_t index)
     if (index >= SENSOR_COUNT) {
         return;
     }
+
+    DATA_LOCK();
 
     sensor_data_t *sensor = &s_sensors[index];
     sensor->history_head = 0;
@@ -129,6 +180,8 @@ void sensor_data_clear_history(uint8_t index)
 
     s_last_interval[index] = 0;
     s_cumulative_minutes[index] = 0;
+
+    DATA_UNLOCK();
 }
 
 void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
@@ -138,6 +191,8 @@ void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
     if (index >= SENSOR_COUNT) {
         return;
     }
+
+    DATA_LOCK();
 
     sensor_data_t *sensor = &s_sensors[index];
 
@@ -179,6 +234,8 @@ void sensor_data_add_history_with_interval(uint8_t index, uint16_t co2_ppm,
     }
 
     sensor->total_minutes = s_cumulative_minutes[index];
+
+    DATA_UNLOCK();
 }
 
 uint16_t sensor_data_get_total_minutes(uint8_t index)
@@ -196,6 +253,8 @@ const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
         return NULL;
     }
 
+    DATA_LOCK();
+
     sensor_data_t *sensor = &s_sensors[index];
 
     if (out_count) {
@@ -203,6 +262,7 @@ const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
     }
 
     if (sensor->history_count == 0) {
+        DATA_UNLOCK();
         return s_time_offsets_buffer;
     }
 
@@ -223,6 +283,8 @@ const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
         s_time_offsets_buffer[i] = 0;
     }
 
+    DATA_UNLOCK();
+
     return s_time_offsets_buffer;
 }
 
@@ -235,10 +297,13 @@ const int16_t *sensor_data_get_co2_history_filtered(uint8_t index, uint16_t max_
         return NULL;
     }
 
+    DATA_LOCK();
+
     sensor_data_t *sensor = &s_sensors[index];
 
     if (sensor->history_count == 0) {
         if (out_count) *out_count = 0;
+        DATA_UNLOCK();
         return s_filtered_co2_buffer;
     }
 
@@ -269,6 +334,7 @@ const int16_t *sensor_data_get_co2_history_filtered(uint8_t index, uint16_t max_
 
     if (filtered_count == 0) {
         if (out_count) *out_count = 0;
+        DATA_UNLOCK();
         return s_filtered_co2_buffer;
     }
 
@@ -282,6 +348,9 @@ const int16_t *sensor_data_get_co2_history_filtered(uint8_t index, uint16_t max_
     }
 
     if (out_count) *out_count = filtered_count;
+
+    DATA_UNLOCK();
+
     return s_filtered_co2_buffer;
 }
 
@@ -328,19 +397,22 @@ const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count)
         if (out_count) *out_count = 0;
         return NULL;
     }
-    
+
+    DATA_LOCK();
+
     sensor_data_t *sensor = &s_sensors[index];
-    
+
     if (out_count) {
         *out_count = sensor->history_count;
     }
-    
+
     // Reorder ring buffer into chronological order
     // Oldest data first, newest last
     if (sensor->history_count == 0) {
+        DATA_UNLOCK();
         return s_co2_history_buffer;
     }
-    
+
     uint8_t start;
     if (sensor->history_count < SENSOR_HISTORY_SIZE) {
         // Buffer not full yet, start from 0
@@ -349,19 +421,21 @@ const int16_t *sensor_data_get_co2_history(uint8_t index, uint8_t *out_count)
         // Buffer full, start from head (oldest)
         start = sensor->history_head;
     }
-    
+
     for (uint8_t i = 0; i < sensor->history_count; i++) {
         uint8_t src_idx = (start + i) % SENSOR_HISTORY_SIZE;
         s_co2_history_buffer[i] = sensor->co2_history[src_idx];
     }
-    
+
     // Fill remaining with last value (for charts)
-    int16_t last_val = sensor->history_count > 0 ? 
+    int16_t last_val = sensor->history_count > 0 ?
                        s_co2_history_buffer[sensor->history_count - 1] : 0;
     for (uint8_t i = sensor->history_count; i < SENSOR_HISTORY_SIZE; i++) {
         s_co2_history_buffer[i] = last_val;
     }
-    
+
+    DATA_UNLOCK();
+
     return s_co2_history_buffer;
 }
 
@@ -373,6 +447,8 @@ static const int16_t *get_history_generic(uint8_t index, uint8_t *out_count,
         return NULL;
     }
 
+    DATA_LOCK();
+
     sensor_data_t *sensor = &s_sensors[index];
 
     if (out_count) {
@@ -380,6 +456,7 @@ static const int16_t *get_history_generic(uint8_t index, uint8_t *out_count,
     }
 
     if (sensor->history_count == 0) {
+        DATA_UNLOCK();
         return dst_buffer;
     }
 
@@ -400,6 +477,8 @@ static const int16_t *get_history_generic(uint8_t index, uint8_t *out_count,
     for (uint8_t i = sensor->history_count; i < SENSOR_HISTORY_SIZE; i++) {
         dst_buffer[i] = last_val;
     }
+
+    DATA_UNLOCK();
 
     return dst_buffer;
 }

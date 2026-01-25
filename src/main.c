@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "freertos/event_groups.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -76,19 +77,32 @@ static TimerHandle_t s_sensor_timer = NULL;
 static TimerHandle_t s_refresh_timer = NULL;
 static TimerHandle_t s_progress_timer = NULL;
 
-// Flag to trigger display refresh
-static volatile bool s_do_refresh = false;
+// Event group for thread-safe display refresh signaling
+// Using event groups instead of volatile bool to avoid race conditions
+static EventGroupHandle_t s_display_events = NULL;
+#define DISPLAY_EVENT_REFRESH (1 << 0)
+
+// Helper macros for thread-safe refresh flag access
+#define SET_REFRESH_FLAG() do { \
+    if (s_display_events != NULL) { \
+        xEventGroupSetBits(s_display_events, DISPLAY_EVENT_REFRESH); \
+    } \
+} while(0)
+
+#define CLEAR_AND_CHECK_REFRESH_FLAG() \
+    (s_display_events != NULL && \
+     (xEventGroupClearBits(s_display_events, DISPLAY_EVENT_REFRESH) & DISPLAY_EVENT_REFRESH))
 
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
 
-// History download task handle (unused - kept for potential future background download feature)
-static TaskHandle_t s_history_task __attribute__((unused)) = NULL;
+// History download task handle - set to NULL after task completes
+static TaskHandle_t s_history_task = NULL;
 
 static void progress_update_cb(TimerHandle_t timer)
 {
     (void)timer;
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
 }
 
 /**
@@ -117,8 +131,15 @@ static void download_sensor_history(uint8_t sensor_idx)
             NULL,
             progress_update_cb
         );
+        if (s_progress_timer == NULL) {
+            ESP_LOGE(TAG, "Failed to create progress timer!");
+        }
     }
-    xTimerStart(s_progress_timer, 0);
+    if (s_progress_timer != NULL) {
+        if (xTimerStart(s_progress_timer, pdMS_TO_TICKS(100)) != pdPASS) {
+            ESP_LOGW(TAG, "Failed to start progress timer");
+        }
+    }
 
     LOG_HEAP("before BLE download");  // Check heap right before BLE connection
 
@@ -130,14 +151,16 @@ static void download_sensor_history(uint8_t sensor_idx)
         &count
     );
 
-    xTimerStop(s_progress_timer, 0);
+    if (s_progress_timer != NULL) {
+        xTimerStop(s_progress_timer, pdMS_TO_TICKS(100));
+    }
 
     // Clear downloading flag
     if (sensor) {
         sensor->downloading = false;
     }
 
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
 
     if (ret == ESP_OK && count > 0) {
         ESP_LOGI(TAG, "");
@@ -204,7 +227,7 @@ static void history_download_task(void *arg)
         if (sensor) {
             sensor->downloading = true;
         }
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
 
         download_sensor_history(i);
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -214,7 +237,7 @@ static void history_download_task(void *arg)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "  History sync complete!");
     ESP_LOGI(TAG, "========================================");
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
 
     ESP_LOGI(TAG, "Starting periodic BLE reading...");
     inkbird_ble_start();
@@ -255,18 +278,21 @@ static void sensor_update_cb(TimerHandle_t timer)
         }
     }
 
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
     led_update_from_co2();
     ESP_LOGI(TAG, "Sensor data updated from BLE");
 }
 
 /**
  * @brief Display refresh timer callback
+ *
+ * Timer callbacks run from timer daemon task context.
+ * Using event groups ensures thread-safe signaling to display task.
  */
 static void display_refresh_cb(TimerHandle_t timer)
 {
     (void)timer;
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
 }
 
 /**
@@ -377,8 +403,8 @@ static void display_task(void *arg)
         bool downloading = any_sensor_downloading();
         int64_t update_interval = downloading ? UPDATE_INTERVAL_FAST_US : UPDATE_INTERVAL_NORMAL_US;
 
-        if (s_do_refresh || (now_us - last_update_us) >= update_interval) {
-            s_do_refresh = false;
+        bool needs_refresh = CLEAR_AND_CHECK_REFRESH_FLAG();
+        if (needs_refresh || (now_us - last_update_us) >= update_interval) {
             last_update_us = now_us;
             ui_co2_display_update();
             ui_co2_display_force_refresh();
@@ -407,6 +433,13 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Create event group for thread-safe display refresh signaling
+    s_display_events = xEventGroupCreate();
+    if (s_display_events == NULL) {
+        ESP_LOGE(TAG, "Failed to create display event group!");
+        return;
+    }
 
     // ========== STAGE 1: Initialize display and render loading screen ==========
     ESP_LOGI(TAG, "[Stage 1] Initializing display subsystem...");
@@ -503,7 +536,7 @@ void app_main(void)
     if (known_count == 0) {
         ESP_LOGI(TAG, "[Stage 4] No known sensors, running discovery first");
         ui_co2_display_set_status("Scanning...");
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
 
         inkbird_ble_discover();
         inkbird_ble_register_discovered();
@@ -522,7 +555,7 @@ void app_main(void)
 
     // BLE init complete - show main screen
     ui_co2_display_loading_complete();
-    s_do_refresh = true;
+    SET_REFRESH_FLAG();
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // ========== SENSOR INITIALIZATION: Each sensor fully initialized before moving to next ==========
@@ -540,7 +573,7 @@ void app_main(void)
 
         // Step 1: Get current reading (also receives settings automatically)
         sensor_data_set_activity_status(i, "Reading...");
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
         read_initial_sensor_value(i);
         vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -549,14 +582,14 @@ void app_main(void)
         if (sensor) {
             sensor->downloading = true;
         }
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
         download_sensor_history(i);
         vTaskDelay(pdMS_TO_TICKS(200));
 #endif
 
         // Clear status - sensor is ready
         sensor_data_set_activity_status(i, NULL);
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
 
         ESP_LOGI(TAG, "  Sensor %d ready", i);
         LOG_HEAP("after sensor init");
@@ -573,7 +606,7 @@ void app_main(void)
         ESP_LOGI(TAG, "[Stage 5] Room for %d more sensor(s), scanning for new devices...",
                  INKBIRD_SENSOR_COUNT - active_count);
         ui_co2_display_set_status("Scanning...");
-        s_do_refresh = true;
+        SET_REFRESH_FLAG();
 
         uint8_t before_count = active_count;
         inkbird_ble_discover();
@@ -601,7 +634,7 @@ void app_main(void)
                 sensor_data_t *sensor = sensor_data_get(i);
 
                 sensor_data_set_activity_status(i, "Reading...");
-                s_do_refresh = true;
+                SET_REFRESH_FLAG();
                 read_initial_sensor_value(i);
                 vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -609,13 +642,13 @@ void app_main(void)
                 if (sensor) {
                     sensor->downloading = true;
                 }
-                s_do_refresh = true;
+                SET_REFRESH_FLAG();
                 download_sensor_history(i);
                 vTaskDelay(pdMS_TO_TICKS(200));
 #endif
 
                 sensor_data_set_activity_status(i, NULL);
-                s_do_refresh = true;
+                SET_REFRESH_FLAG();
 
                 ESP_LOGI(TAG, "  Sensor %d ready", i);
                 LOG_HEAP("after new sensor init");
@@ -649,7 +682,11 @@ void app_main(void)
         NULL,
         sensor_update_cb
     );
-    xTimerStart(s_sensor_timer, 0);
+    if (s_sensor_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create sensor update timer!");
+    } else if (xTimerStart(s_sensor_timer, pdMS_TO_TICKS(100)) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start sensor update timer!");
+    }
 
     s_refresh_timer = xTimerCreate(
         "display_refresh",
@@ -658,7 +695,11 @@ void app_main(void)
         NULL,
         display_refresh_cb
     );
-    xTimerStart(s_refresh_timer, 0);
+    if (s_refresh_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create display refresh timer!");
+    } else if (xTimerStart(s_refresh_timer, pdMS_TO_TICKS(100)) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start display refresh timer!");
+    }
 
     ESP_LOGI(TAG, "Initialization complete!");
     ESP_LOGI(TAG, "Tap a sensor tile to view its detail page with history chart.");

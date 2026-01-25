@@ -487,7 +487,7 @@ inkbird_reading_t inkbird_ble_get_reading(uint8_t index)
         return reading;
     }
 
-    xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+    BLE_MUTEX_LOCK();
 
     reading = s_readings[index];
 
@@ -498,7 +498,7 @@ inkbird_reading_t inkbird_ble_get_reading(uint8_t index)
         reading.stale = (age > INKBIRD_DATA_STALE_MS);
     }
 
-    xSemaphoreGive(s_ble_mutex);
+    BLE_MUTEX_UNLOCK();
 
     return reading;
 }
@@ -584,9 +584,9 @@ esp_err_t inkbird_ble_read_sensor_once(uint8_t sensor_idx,
         ESP_LOGI(TAG, "One-shot read successful for sensor %d", sensor_idx);
 
         if (out_reading != NULL) {
-            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
+            BLE_MUTEX_LOCK();
             *out_reading = s_readings[sensor_idx];
-            xSemaphoreGive(s_ble_mutex);
+            BLE_MUTEX_UNLOCK();
         }
         result = ESP_OK;
     } else {

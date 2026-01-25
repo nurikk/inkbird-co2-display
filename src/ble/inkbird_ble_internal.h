@@ -175,6 +175,20 @@ extern uint16_t s_cccd_handle;
 extern SemaphoreHandle_t s_ble_mutex;
 extern SemaphoreHandle_t s_read_complete_sem;
 
+// Helper macros for safe mutex operations with NULL checks
+// These prevent crashes if mutex wasn't initialized or init failed
+#define BLE_MUTEX_LOCK() do { \
+    if (s_ble_mutex != NULL) { \
+        xSemaphoreTake(s_ble_mutex, portMAX_DELAY); \
+    } \
+} while(0)
+
+#define BLE_MUTEX_UNLOCK() do { \
+    if (s_ble_mutex != NULL) { \
+        xSemaphoreGive(s_ble_mutex); \
+    } \
+} while(0)
+
 // Task handle
 extern TaskHandle_t s_read_task_handle;
 

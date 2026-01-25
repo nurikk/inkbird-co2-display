@@ -134,6 +134,21 @@ static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
 #define INKBIRD_CONNECTION_TEST_TIMEOUT_MS  10000
 
 // ============================================================================
+// History Download Configuration
+// ============================================================================
+
+// Timeout for history download connection setup (milliseconds)
+#define INKBIRD_HISTORY_CONNECT_TIMEOUT_MS  30000
+
+// Timeout for complete history download (milliseconds) - 5 minutes
+// Large datasets with 1500+ records can take several minutes to transfer
+#define INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS 300000
+
+// Maximum downsample rate for history - never skip more than this many records
+// Ensures we always get meaningful data coverage even with early termination
+#define INKBIRD_MAX_DOWNSAMPLE_RATE  50
+
+// ============================================================================
 // NVS Configuration
 // ============================================================================
 
