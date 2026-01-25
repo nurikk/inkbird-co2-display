@@ -150,22 +150,77 @@ bool inkbird_parse_history_record(const uint8_t *data)
 // ============================================================================
 
 /**
+ * @brief Check if data looks like a valid end marker (not false positive in record data)
+ *
+ * The end marker 0x66 0x66 can appear as false positives in record data.
+ * We accept the marker if:
+ * 1. We've received >= 15% of expected records, OR
+ * 2. We've received >= 500 records (absolute threshold for large datasets)
+ *
+ * The sensor may report more records than it actually sends (firmware quirk).
+ */
+static bool is_valid_end_marker(size_t offset_in_packet, size_t packet_len)
+{
+    (void)packet_len;  // Unused
+
+    // Very early end marker is suspicious (likely false positive in first records)
+    if (s_history_received_count < 100) {
+        ESP_LOGW(TAG, "Ignoring early end marker: only %u records received",
+                 s_history_received_count);
+        return false;
+    }
+
+    // Accept if we have a reasonable amount of data
+    // Sensors often report more records than they actually send
+    if (s_history_received_count >= 500) {
+        ESP_LOGI(TAG, "End marker validated: received %u records (>500 threshold)",
+                 s_history_received_count);
+        return true;
+    }
+
+    // Accept if we've received >= 15% of expected (sensor may over-report)
+    if (s_history_expected_count > 0) {
+        uint16_t min_required = s_history_expected_count * 15 / 100;
+        if (min_required < 100) min_required = 100;  // At least 100 records
+        if (s_history_received_count >= min_required) {
+            ESP_LOGI(TAG, "End marker validated: received %u/%u (>15%%)",
+                     s_history_received_count, s_history_expected_count);
+            return true;
+        }
+        ESP_LOGW(TAG, "Ignoring end marker: received %u/%u (need >%u)",
+                 s_history_received_count, s_history_expected_count, min_required);
+        return false;
+    }
+
+    return true;
+}
+
+/**
  * @brief Parse history notification data
  *
  * Protocol (per INKBIRD_IAM_T1_PROTOCOL.md section 6):
  * 1. First packet: 2 bytes = record count (big-endian)
  * 2. Data packets: 10 bytes per record (raw bytes, fragmented across BLE packets)
  * 3. End marker: 0x66 0x66
+ *
+ * IMPORTANT: 0x66 0x66 can appear in valid record data (e.g., CO2=26214 ppm,
+ * or split across temperature/humidity fields). We use is_valid_end_marker()
+ * to filter false positives.
  */
 void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 {
     ESP_LOGD(TAG, "History RX: %d bytes, first 4: %02X %02X %02X %02X",
              (int)len, data[0], len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
-    // Check for end marker (0x6666) anywhere in packet
+    // Check for end marker (0x6666) - but validate to avoid false positives
     for (size_t i = 0; i + 1 < len; i++) {
         if (data[i] == HISTORY_END_MARKER_HIGH && data[i + 1] == HISTORY_END_MARKER_LOW) {
-            ESP_LOGI(TAG, "History end marker in packet at offset %d", (int)i);
+            if (!is_valid_end_marker(i, len)) {
+                // False positive - this is likely data, not a real end marker
+                continue;
+            }
+            ESP_LOGI(TAG, "History end marker confirmed at offset %d (received %u records)",
+                     (int)i, s_history_received_count);
             // Add data before the end marker to buffer
             if (i > 0 && s_history_buffer_len + i < HISTORY_BUFFER_SIZE) {
                 memcpy(s_history_buffer + s_history_buffer_len, data, i);
@@ -188,16 +243,23 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 
             // Calculate downsample rate to fit all data in buffer
             // If sensor has 1500 records and we can only store 200, sample every 8th
+            // Cap at reasonable maximum to ensure we always get meaningful data
+            #define MAX_DOWNSAMPLE_RATE 50  // Never skip more than 50 records at a time
             if (s_history_expected_count > s_history_max_records) {
                 // Add 1 to ensure we don't overflow (round up)
                 s_history_downsample_rate = (s_history_expected_count + s_history_max_records - 1) / s_history_max_records;
+                // Cap the rate to ensure we get meaningful data even with early termination
+                if (s_history_downsample_rate > MAX_DOWNSAMPLE_RATE) {
+                    ESP_LOGW(TAG, "Capping downsample rate from %d to %d", s_history_downsample_rate, MAX_DOWNSAMPLE_RATE);
+                    s_history_downsample_rate = MAX_DOWNSAMPLE_RATE;
+                }
             } else {
                 s_history_downsample_rate = 1;  // No downsampling needed
             }
             s_history_downsample_counter = 0;
 
-            ESP_LOGI(TAG, ">>> History record count: %u (raw: 0x%02X%02X), downsample=%d <<<",
-                     s_history_expected_count, data[0], data[1], s_history_downsample_rate);
+            ESP_LOGI(TAG, ">>> History record count: %u (raw: 0x%02X%02X), downsample=%d, max_buffer=%u <<<",
+                     s_history_expected_count, data[0], data[1], s_history_downsample_rate, s_history_max_records);
 
             // Process remaining data in this packet
             if (len > 2) {
@@ -223,10 +285,12 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 
         // Process complete 10-byte records from buffer
         while (s_history_buffer_len >= 10) {
-            // Check for end marker in buffer
+            // Check for end marker at buffer start (only valid at record boundary)
             if (s_history_buffer[0] == HISTORY_END_MARKER_HIGH &&
-                s_history_buffer[1] == HISTORY_END_MARKER_LOW) {
-                ESP_LOGI(TAG, "History end marker found at buffer start");
+                s_history_buffer[1] == HISTORY_END_MARKER_LOW &&
+                is_valid_end_marker(0, s_history_buffer_len)) {
+                ESP_LOGI(TAG, "History end marker found at buffer start (received %u records)",
+                         s_history_received_count);
                 s_history_state = INKBIRD_HISTORY_COMPLETE;
                 if (s_history_complete_sem != NULL) {
                     xSemaphoreGive(s_history_complete_sem);
@@ -247,12 +311,14 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
             }
         }
 
-        // Check for end marker in remaining buffer
+        // Check for end marker in remaining buffer (with validation)
         if (s_history_buffer_len >= 2) {
             for (size_t i = 0; i <= s_history_buffer_len - 2; i++) {
                 if (s_history_buffer[i] == HISTORY_END_MARKER_HIGH &&
-                    s_history_buffer[i + 1] == HISTORY_END_MARKER_LOW) {
-                    ESP_LOGI(TAG, "History end marker found at offset %d in buffer", (int)i);
+                    s_history_buffer[i + 1] == HISTORY_END_MARKER_LOW &&
+                    is_valid_end_marker(i, s_history_buffer_len)) {
+                    ESP_LOGI(TAG, "History end marker found at offset %d in buffer (received %u records)",
+                             (int)i, s_history_received_count);
                     s_history_state = INKBIRD_HISTORY_COMPLETE;
                     if (s_history_complete_sem != NULL) {
                         xSemaphoreGive(s_history_complete_sem);

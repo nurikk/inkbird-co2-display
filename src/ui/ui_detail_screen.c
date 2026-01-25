@@ -14,6 +14,8 @@
 #include "sdkconfig.h"
 
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
 
 #include "lvgl.h"
 
@@ -23,6 +25,14 @@
 #include "ui_internal.h"
 
 static const char *TAG = "ui_detail";
+
+// Debug macro for heap monitoring
+#define LOG_HEAP(label) do { \
+    ESP_LOGI(TAG, "HEAP[%s]: free=%u largest=%u min=%u", label, \
+        (unsigned)esp_get_free_heap_size(), \
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), \
+        (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)); \
+} while(0)
 
 // ============================================================================
 // Private State - Detail Screen Elements
@@ -490,6 +500,7 @@ void ui_detail_screen_update(int sensor_idx)
 
         if (dl_state == DETAIL_HISTORY_COMPLETE) {
             ESP_LOGI(TAG, "Extended history download complete");
+            LOG_HEAP("download_complete");
             if (s_loading_overlay != NULL) {
                 lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
             }
@@ -584,7 +595,11 @@ void ui_detail_screen_update(int sensor_idx)
                         && detail_count > 0
                         && detail_history_get_sensor_idx() == sensor_idx;
 
+    ESP_LOGD(TAG, "Update: dl_state=%d, detail_count=%u, sensor_idx_match=%d, use_extended=%d",
+             dl_state, detail_count, detail_history_get_sensor_idx() == sensor_idx, use_extended);
+
     if (use_extended) {
+        LOG_HEAP("use_extended_start");
         const int16_t *ext_co2 = detail_history_get_co2(NULL);
         const int16_t *ext_temp = detail_history_get_temp(NULL);
         const int16_t *ext_hum = detail_history_get_hum(NULL);
@@ -727,7 +742,8 @@ void ui_detail_screen_update(int sensor_idx)
 
 void ui_detail_screen_show(int sensor_idx)
 {
-    ESP_LOGI(TAG, ">>> Opening detail screen: sensor_idx=%d", sensor_idx);
+    ESP_LOGW(TAG, ">>> DETAIL SCREEN SHOW: sensor_idx=%d <<<", sensor_idx);
+    LOG_HEAP("detail_show_start");
 
     if (sensor_idx < 0 || sensor_idx >= SENSOR_COUNT) {
         ESP_LOGW(TAG, "Invalid sensor index, ignoring");
@@ -738,7 +754,9 @@ void ui_detail_screen_show(int sensor_idx)
     s_last_download_state = DETAIL_HISTORY_IDLE;
 
     if (g_detail_screen == NULL) {
+        LOG_HEAP("before_create");
         ui_detail_screen_create();
+        LOG_HEAP("after_create");
     }
 
     // Check if history data is already available
@@ -767,9 +785,9 @@ void ui_detail_screen_show(int sensor_idx)
     }
 
     if (detail_history_start_download(sensor_idx)) {
-        ESP_LOGI(TAG, "Started extended history download for sensor %d", sensor_idx);
+        ESP_LOGW(TAG, ">>> HISTORY DOWNLOAD STARTED for sensor %d <<<", sensor_idx);
     } else {
-        ESP_LOGW(TAG, "Failed to start history download for sensor %d", sensor_idx);
+        ESP_LOGE(TAG, ">>> FAILED TO START HISTORY DOWNLOAD for sensor %d <<<", sensor_idx);
         if (s_loading_overlay != NULL) {
             lv_obj_add_flag(s_loading_overlay, LV_OBJ_FLAG_HIDDEN);
         }

@@ -62,7 +62,7 @@ static void download_task(void *arg)
 {
     uint8_t sensor_idx = (uint8_t)(uintptr_t)arg;
 
-    ESP_LOGI(TAG, "Download task started for sensor %d", sensor_idx);
+    ESP_LOGW(TAG, ">>> DOWNLOAD TASK STARTED: sensor=%d, state=%d <<<", sensor_idx, s_state);
 
     // Stop periodic BLE reading to avoid conflicts during history download
     // This must happen in the download task (not caller) to avoid blocking UI
@@ -88,11 +88,11 @@ static void download_task(void *arg)
              (unsigned)(sizeof(inkbird_history_record_t) * DOWNLOAD_BUFFER_SIZE), DOWNLOAD_BUFFER_SIZE);
 
     // Start BLE download
-    ESP_LOGI(TAG, "Starting BLE download for sensor %d, max_records=%d", sensor_idx, DOWNLOAD_BUFFER_SIZE);
+    ESP_LOGW(TAG, ">>> STARTING BLE DOWNLOAD: sensor=%d, max_records=%d <<<", sensor_idx, DOWNLOAD_BUFFER_SIZE);
     uint16_t out_count = 0;
     esp_err_t ret = inkbird_ble_download_history(sensor_idx, s_download_buffer,
                                                   DOWNLOAD_BUFFER_SIZE, &out_count);
-    ESP_LOGI(TAG, "BLE download returned: ret=%s, out_count=%u", esp_err_to_name(ret), out_count);
+    ESP_LOGW(TAG, ">>> BLE DOWNLOAD RETURNED: ret=%s, out_count=%u <<<", esp_err_to_name(ret), out_count);
 
     // Check if cancelled during download
     if (s_cancel_requested) {
@@ -168,10 +168,11 @@ static void download_task(void *arg)
                  s_history_count, s_total_minutes, s_total_minutes / 60.0f);
 
         s_state = DETAIL_HISTORY_COMPLETE;
+        ESP_LOGW(TAG, ">>> DOWNLOAD COMPLETE: %u records, total_mins=%u <<<", s_history_count, s_total_minutes);
     }
 
     // Restart periodic BLE reading
-    ESP_LOGI(TAG, "Restarting periodic BLE reading...");
+    ESP_LOGW(TAG, ">>> RESTARTING PERIODIC BLE READING, final state=%d <<<", s_state);
     inkbird_ble_start();
 
     // Buffer is static, no free needed
