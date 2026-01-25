@@ -37,7 +37,7 @@ typedef struct {
     int16_t  temperature;   // Temperature in 0.1°C units
     uint16_t humidity;      // Relative humidity in 0.1% units
     uint16_t pressure;      // Atmospheric pressure in hPa
-    uint32_t timestamp;     // Reading timestamp (ms since boot)
+    int64_t  timestamp;     // Reading timestamp (ms since boot, from esp_timer)
     bool     valid;         // true if data has been received at least once
     bool     stale;         // true if data is older than INKBIRD_DATA_STALE_MS
 } inkbird_reading_t;

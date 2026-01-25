@@ -20,6 +20,7 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 
 // NimBLE includes
 #include "nimble/nimble_port.h"

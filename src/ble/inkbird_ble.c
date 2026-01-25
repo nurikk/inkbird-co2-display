@@ -274,13 +274,8 @@ esp_err_t inkbird_ble_init(void)
 
     ESP_LOGI(TAG, "Initializing BLE (NimBLE stack) for Inkbird sensors...");
 
-    // Initialize NVS (required for BLE)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    // NOTE: NVS must be initialized by caller (app_main) before calling this function.
+    // We no longer initialize NVS here to avoid double initialization.
 
     // Initialize readings and thresholds
     memset(s_readings, 0, sizeof(s_readings));
@@ -326,15 +321,17 @@ esp_err_t inkbird_ble_init(void)
 #if CONFIG_IDF_TARGET_ESP32S3
     // ESP32-S3 uses different brownout registers - disable via RTC_CNTL
     ESP_LOGW(TAG, "Disabling brownout detector for RF calibration (S3)...");
+    uint32_t brownout_reg_backup = REG_READ(RTC_CNTL_BROWN_OUT_REG);
     REG_CLR_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA);
 #else
     ESP_LOGW(TAG, "Disabling brownout detector for RF calibration...");
+    uint32_t brownout_reg_backup = READ_PERI_REG(RTC_CNTL_BROWN_OUT_REG);
     WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 #endif
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Initialize NimBLE port
-    ret = nimble_port_init();
+    esp_err_t ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init NimBLE port: %s", esp_err_to_name(ret));
         return ret;
@@ -369,6 +366,15 @@ esp_err_t inkbird_ble_init(void)
         ESP_LOGE(TAG, "NimBLE host failed to sync");
         return ESP_FAIL;
     }
+
+    // Re-enable brownout detector now that RF calibration is complete
+#if CONFIG_IDF_TARGET_ESP32S3
+    REG_WRITE(RTC_CNTL_BROWN_OUT_REG, brownout_reg_backup);
+    ESP_LOGI(TAG, "Brownout detector re-enabled (S3)");
+#else
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, brownout_reg_backup);
+    ESP_LOGI(TAG, "Brownout detector re-enabled");
+#endif
 
     s_ble_initialized = true;
     ESP_LOGI(TAG, "BLE initialized successfully (NimBLE stack)");
@@ -430,18 +436,38 @@ esp_err_t inkbird_ble_stop(void)
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "Stopping BLE reading...");
     s_running = false;
 
-    // Wait for task to exit
-    if (s_read_task_handle != NULL) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        s_read_task_handle = NULL;
-    }
-
-    // Disconnect all peers
+    // Disconnect all peers first to unblock any waiting connections
     for (int i = 0; i < s_peer_count; i++) {
         if (s_peers[i].connected && s_peers[i].conn_handle != INVALID_CONN_HANDLE) {
             ble_gap_terminate(s_peers[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
+
+    // Signal semaphore to unblock task if it's waiting
+    if (s_read_complete_sem != NULL) {
+        xSemaphoreGive(s_read_complete_sem);
+    }
+
+    // Wait for task to exit with timeout
+    if (s_read_task_handle != NULL) {
+        // Poll for task deletion (task sets handle to NULL before deleting itself)
+        // Give the task time to complete its current iteration
+        int wait_count = 0;
+        const int max_wait_iterations = 50;  // 5 seconds max wait
+        while (s_read_task_handle != NULL && wait_count < max_wait_iterations) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            wait_count++;
+            // Signal again in case task is waiting on semaphore
+            if (s_read_complete_sem != NULL && wait_count % 5 == 0) {
+                xSemaphoreGive(s_read_complete_sem);
+            }
+        }
+        if (s_read_task_handle != NULL) {
+            ESP_LOGW(TAG, "Read task did not exit cleanly, forcing cleanup");
+            s_read_task_handle = NULL;
         }
     }
 
@@ -465,10 +491,10 @@ inkbird_reading_t inkbird_ble_get_reading(uint8_t index)
 
     reading = s_readings[index];
 
-    // Check if data is stale
+    // Check if data is stale - use 64-bit time to avoid wrap issues
     if (reading.valid) {
-        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        uint32_t age = now - reading.timestamp;
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        int64_t age = now_ms - reading.timestamp;
         reading.stale = (age > INKBIRD_DATA_STALE_MS);
     }
 

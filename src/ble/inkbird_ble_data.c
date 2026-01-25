@@ -211,8 +211,8 @@ bool inkbird_parse_data(const uint8_t *data, size_t len, uint8_t sensor_idx)
         // Pressure (bytes 11-12)
         reading->pressure = ((uint16_t)data[11] << 8) | data[12];
 
-        // Update metadata
-        reading->timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        // Update metadata - use esp_timer for 64-bit timestamp that won't wrap
+        reading->timestamp = esp_timer_get_time() / 1000;  // Convert us to ms
         reading->valid = true;
         reading->stale = false;
 
@@ -269,20 +269,23 @@ void inkbird_read_task(void *arg)
             }
 
             // Clear peer list and create a single peer for this sensor
+            xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
             s_peer_count = 0;
+            xSemaphoreGive(s_ble_mutex);
             inkbird_peer_t *peer = peer_add(i);
             if (peer == NULL) {
                 ESP_LOGE(TAG, "Failed to create peer for sensor %d", i);
                 continue;
             }
 
-            // Drain stale semaphore signals
-            while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
-
-            // Update legacy globals
+            // Initialize state BEFORE draining semaphore to close race window.
+            // Even if a stale signal arrives after drain, we verify with peer->data_received.
             s_current_sensor_index = i;
             s_data_received = false;
             s_connected = false;
+
+            // Drain stale semaphore signals (benign race: we check peer->data_received anyway)
+            while (xSemaphoreTake(s_read_complete_sem, 0) == pdTRUE) {}
 
             ESP_LOGI(TAG, "Connecting to sensor %d (%s): %02X:%02X:%02X:%02X:%02X:%02X",
                      peer->sensor_idx, s_active_sensors[peer->sensor_idx].name,
@@ -324,7 +327,9 @@ void inkbird_read_task(void *arg)
         }
 
         // Clear peer list after cycle
+        xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
         s_peer_count = 0;
+        xSemaphoreGive(s_ble_mutex);
 
         // Wait until next read cycle
         if (s_running) {
@@ -335,7 +340,12 @@ void inkbird_read_task(void *arg)
     }
 
     // Cleanup
+    xSemaphoreTake(s_ble_mutex, portMAX_DELAY);
     s_peer_count = 0;
+    xSemaphoreGive(s_ble_mutex);
     ESP_LOGI(TAG, "Read task exiting");
+
+    // Clear task handle before deleting to signal clean exit
+    s_read_task_handle = NULL;
     vTaskDelete(NULL);
 }

@@ -82,8 +82,8 @@ static volatile bool s_do_refresh = false;
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
 
-// History download task handle
-static TaskHandle_t s_history_task = NULL;
+// History download task handle (unused - kept for potential future background download feature)
+static TaskHandle_t s_history_task __attribute__((unused)) = NULL;
 
 static void progress_update_cb(TimerHandle_t timer)
 {
@@ -108,6 +108,7 @@ static void download_sensor_history(uint8_t sensor_idx)
     ESP_LOGI(TAG, "  Name: %s", inkbird_ble_get_sensor_name(sensor_idx));
     ESP_LOGI(TAG, "========================================");
 
+    // Lazily create progress timer (singleton - reused across history downloads)
     if (s_progress_timer == NULL) {
         s_progress_timer = xTimerCreate(
             "progress",
@@ -634,7 +635,13 @@ void app_main(void)
     ESP_LOGI(TAG, "  All %d sensors ready!", active_count);
     ESP_LOGI(TAG, "========================================");
 
+    // Start periodic BLE reading BEFORE timers to avoid race conditions
+    // (timers may fire while BLE task is still initializing)
+    ESP_LOGI(TAG, "Starting periodic BLE reading...");
+    inkbird_ble_start();
+
     // ========== Set up display timers ==========
+    // Now safe to start timers - BLE task is running
     s_sensor_timer = xTimerCreate(
         "sensor_update",
         pdMS_TO_TICKS(SENSOR_UPDATE_MS),
@@ -652,10 +659,6 @@ void app_main(void)
         display_refresh_cb
     );
     xTimerStart(s_refresh_timer, 0);
-
-    // Start periodic BLE reading
-    ESP_LOGI(TAG, "Starting periodic BLE reading...");
-    inkbird_ble_start();
 
     ESP_LOGI(TAG, "Initialization complete!");
     ESP_LOGI(TAG, "Tap a sensor tile to view its detail page with history chart.");
