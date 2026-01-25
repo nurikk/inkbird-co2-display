@@ -243,7 +243,10 @@ uint16_t sensor_data_get_total_minutes(uint8_t index)
     if (index >= SENSOR_COUNT) {
         return 0;
     }
-    return s_sensors[index].total_minutes;
+    DATA_LOCK();
+    uint16_t total = s_sensors[index].total_minutes;
+    DATA_UNLOCK();
+    return total;
 }
 
 const uint16_t *sensor_data_get_time_offsets(uint8_t index, uint8_t *out_count)
@@ -519,8 +522,10 @@ void sensor_data_set_name(uint8_t index, const char *name)
         return;
     }
 
+    DATA_LOCK();
     strncpy(s_sensors[index].name, name, sizeof(s_sensors[index].name) - 1);
     s_sensors[index].name[sizeof(s_sensors[index].name) - 1] = '\0';
+    DATA_UNLOCK();
 }
 
 void sensor_data_set_activity_status(uint8_t index, const char *status)
@@ -529,12 +534,14 @@ void sensor_data_set_activity_status(uint8_t index, const char *status)
         return;
     }
 
+    DATA_LOCK();
     if (status == NULL) {
         s_sensors[index].activity_status[0] = '\0';
     } else {
         strncpy(s_sensors[index].activity_status, status, sizeof(s_sensors[index].activity_status) - 1);
         s_sensors[index].activity_status[sizeof(s_sensors[index].activity_status) - 1] = '\0';
     }
+    DATA_UNLOCK();
 }
 
 const char *sensor_data_get_activity_status(uint8_t index)
@@ -542,5 +549,10 @@ const char *sensor_data_get_activity_status(uint8_t index)
     if (index >= SENSOR_COUNT) {
         return "";
     }
-    return s_sensors[index].activity_status;
+    // Note: Returns pointer to internal buffer. Caller should copy if needed
+    // for long-term storage. Safe for immediate use in single display thread.
+    DATA_LOCK();
+    const char *status = s_sensors[index].activity_status;
+    DATA_UNLOCK();
+    return status;
 }

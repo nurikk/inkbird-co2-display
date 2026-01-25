@@ -38,40 +38,16 @@ typedef struct {
  * Instructions:
  * 1. First boot: Run with all sensors disabled (enabled = false)
  * 2. Check serial output for discovered Inkbird sensors and their MACs
- * 3. Update the MAC addresses below with your sensor addresses
+ * 3. Update the MAC addresses in inkbird_ble.c with your sensor addresses
  * 4. Set enabled = true for configured sensors
  * 5. Rebuild and flash
  *
  * MAC format: {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}
  * The MAC is printed in the log as AA:BB:CC:DD:EE:FF
+ *
+ * Defined in inkbird_ble.c
  */
-static const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
-    // Sensor 0 - Office (Ink@IAM-T1)
-    // MAC discovered as: {0x62, 0x00, 0xA1, 0x35, 0x94, 0x2B}
-    {
-        .mac = {0x62, 0x00, 0xA1, 0x35, 0x94, 0x2B},
-        .name = "Office",
-        .enabled = true
-    },
-    // Sensor 1 - Leysan (Ink@IAM-T1)
-    {
-        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB2, 0x79},
-        .name = "Leysan",
-        .enabled = true
-    },
-    // Sensor 2 - Bedroom (Ink@IAM-T1)
-    {
-        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB3, 0x93},
-        .name = "Bedroom",
-        .enabled = true
-    },
-    // Sensor 3 - Update MAC after discovery
-    {
-        .mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-        .name = "Kitchen",
-        .enabled = false
-    },
-};
+extern const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT];
 
 // ============================================================================
 // BLE Protocol Configuration (Inkbird IAM-T1)

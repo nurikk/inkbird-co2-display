@@ -96,9 +96,6 @@ static EventGroupHandle_t s_display_events = NULL;
 // History storage (static allocation) - use SENSOR_HISTORY_SIZE to match chart capacity
 static inkbird_history_record_t s_history_records[SENSOR_HISTORY_SIZE];
 
-// History download task handle - set to NULL after task completes
-static TaskHandle_t s_history_task = NULL;
-
 static void progress_update_cb(TimerHandle_t timer)
 {
     (void)timer;
@@ -202,48 +199,6 @@ static void download_sensor_history(uint8_t sensor_idx)
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
-}
-
-/**
- * @brief Background task to download history from all sensors
- *
- * After history download completes, starts periodic BLE reading.
- */
-static void history_download_task(void *arg)
-{
-    (void)arg;
-
-    LOG_HEAP("history_task start");  // Check heap after 8KB task stack allocation
-
-    uint8_t active_count = inkbird_ble_get_active_count();
-
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  Background: Syncing Historical Data");
-    ESP_LOGI(TAG, "========================================");
-
-    for (int i = 0; i < active_count; i++) {
-        sensor_data_t *sensor = sensor_data_get(i);
-        if (sensor) {
-            sensor->downloading = true;
-        }
-        SET_REFRESH_FLAG();
-
-        download_sensor_history(i);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  History sync complete!");
-    ESP_LOGI(TAG, "========================================");
-    SET_REFRESH_FLAG();
-
-    ESP_LOGI(TAG, "Starting periodic BLE reading...");
-    inkbird_ble_start();
-
-    s_history_task = NULL;
-    vTaskDelete(NULL);
 }
 
 /**

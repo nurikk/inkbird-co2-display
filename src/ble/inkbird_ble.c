@@ -36,6 +36,37 @@
 static const char *TAG = "inkbird_ble";
 
 // ============================================================================
+// Sensor Configuration (compile-time known sensors)
+// ============================================================================
+
+const inkbird_sensor_config_t INKBIRD_SENSORS[INKBIRD_SENSOR_COUNT] = {
+    // Sensor 0 - Office (Ink@IAM-T1)
+    {
+        .mac = {0x62, 0x00, 0xA1, 0x35, 0x94, 0x2B},
+        .name = "Office",
+        .enabled = true
+    },
+    // Sensor 1 - Leysan (Ink@IAM-T1)
+    {
+        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB2, 0x79},
+        .name = "Leysan",
+        .enabled = true
+    },
+    // Sensor 2 - Bedroom (Ink@IAM-T1)
+    {
+        .mac = {0x62, 0x00, 0xA1, 0x3F, 0xB3, 0x93},
+        .name = "Bedroom",
+        .enabled = true
+    },
+    // Sensor 3 - Update MAC after discovery
+    {
+        .mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        .name = "Kitchen",
+        .enabled = false
+    },
+};
+
+// ============================================================================
 // Command Packets (from APK reverse engineering)
 // ============================================================================
 
@@ -313,6 +344,8 @@ esp_err_t inkbird_ble_init(void)
     s_read_complete_sem = xSemaphoreCreateBinary();
     if (s_read_complete_sem == NULL) {
         ESP_LOGE(TAG, "Failed to create semaphore");
+        vSemaphoreDelete(s_ble_mutex);
+        s_ble_mutex = NULL;
         return ESP_ERR_NO_MEM;
     }
 
