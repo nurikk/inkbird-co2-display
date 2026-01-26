@@ -361,6 +361,25 @@ static void inkbird_on_connect(inkbird_peer_t *peer, uint16_t conn_handle)
         if (rc != 0) {
             ESP_LOGW(TAG, "Connection param update request failed: %d", rc);
         }
+
+        // Request 2M PHY for double throughput (2 Mbps vs 1 Mbps)
+        // tx_phys=2 (2M), rx_phys=2 (2M), phy_opts=0
+        rc = ble_gap_set_prefered_le_phy(conn_handle, BLE_GAP_LE_PHY_2M_MASK,
+                                          BLE_GAP_LE_PHY_2M_MASK, 0);
+        if (rc != 0) {
+            ESP_LOGD(TAG, "2M PHY request failed: %d (device may not support it)", rc);
+        } else {
+            ESP_LOGI(TAG, "Requested 2M PHY for faster transfer");
+        }
+
+        // Request Data Length Extension for larger link layer packets
+        // tx_octets=251 (max), tx_time=2120us (max for 251 bytes at 1M PHY)
+        rc = ble_hs_hci_util_set_data_len(conn_handle, 251, 2120);
+        if (rc != 0) {
+            ESP_LOGD(TAG, "DLE request failed: %d (device may not support it)", rc);
+        } else {
+            ESP_LOGI(TAG, "Requested Data Length Extension (251 bytes)");
+        }
     }
 
     // Start service discovery
