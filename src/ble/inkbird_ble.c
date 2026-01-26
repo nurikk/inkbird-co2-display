@@ -158,6 +158,7 @@ bool s_history_buffer_wrapped = false;
 bool s_history_setup_mode = false;
 uint8_t s_history_downsample_rate = 1;
 uint16_t s_history_downsample_counter = 0;
+uint32_t s_history_last_recv_time = 0;
 
 // ============================================================================
 // NimBLE Callbacks
@@ -374,6 +375,10 @@ esp_err_t inkbird_ble_init(void)
     ble_hs_cfg.reset_cb = inkbird_on_reset;
     ble_hs_cfg.sync_cb = inkbird_on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+    // Set preferred MTU for faster data transfer
+    // Default is 23 bytes, 247 allows ~10x more data per packet
+    ble_att_set_preferred_mtu(247);
 
     // Initialize GAP and GATT services
     ble_svc_gap_init();

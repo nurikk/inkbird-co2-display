@@ -216,6 +216,7 @@ extern bool s_history_buffer_wrapped;
 extern bool s_history_setup_mode;  // True during connection setup for history download
 extern uint8_t s_history_downsample_rate;  // Sample every Nth record (1=no downsampling)
 extern uint16_t s_history_downsample_counter;  // Counter for downsampling
+extern uint32_t s_history_last_recv_time;  // Last time data was received (ms ticks)
 
 // ============================================================================
 // Internal Function Declarations

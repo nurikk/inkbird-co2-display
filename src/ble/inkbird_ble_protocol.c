@@ -339,6 +339,30 @@ static void inkbird_on_connect(inkbird_peer_t *peer, uint16_t conn_handle)
 
     sensor_data_set_activity_status(peer->sensor_idx, "Discovering...");
 
+    // Request larger MTU for faster data transfer (especially for history download)
+    // Default MTU is 23 bytes, request 247 for ~10x more data per packet
+    int rc = ble_gattc_exchange_mtu(conn_handle, NULL, NULL);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "MTU exchange request failed: %d (continuing anyway)", rc);
+    }
+
+    // Request faster connection parameters for history download
+    // Lower interval = faster data transfer (7.5ms is the minimum allowed)
+    if (s_history_setup_mode) {
+        struct ble_gap_upd_params params = {
+            .itvl_min = 6,   // 7.5ms (6 * 1.25ms) - fastest allowed
+            .itvl_max = 12,  // 15ms (12 * 1.25ms)
+            .latency = 0,
+            .supervision_timeout = 200,  // 2 seconds
+            .min_ce_len = 0,
+            .max_ce_len = 0,
+        };
+        rc = ble_gap_update_params(conn_handle, &params);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "Connection param update request failed: %d", rc);
+        }
+    }
+
     // Start service discovery
     inkbird_start_service_discovery(peer);
 }

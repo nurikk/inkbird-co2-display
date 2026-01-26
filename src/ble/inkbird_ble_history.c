@@ -209,30 +209,16 @@ static bool is_valid_end_marker(size_t offset_in_packet, size_t packet_len)
  */
 void inkbird_parse_history_notification(const uint8_t *data, size_t len)
 {
+    // Track when we last received data for stall detection
+    s_history_last_recv_time = xTaskGetTickCount();
+
     ESP_LOGD(TAG, "History RX: %d bytes, first 4: %02X %02X %02X %02X",
              (int)len, data[0], len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
-    // Check for end marker (0x6666) - but validate to avoid false positives
-    for (size_t i = 0; i + 1 < len; i++) {
-        if (data[i] == HISTORY_END_MARKER_HIGH && data[i + 1] == HISTORY_END_MARKER_LOW) {
-            if (!is_valid_end_marker(i, len)) {
-                // False positive - this is likely data, not a real end marker
-                continue;
-            }
-            ESP_LOGI(TAG, "History end marker confirmed at offset %d (received %u records)",
-                     (int)i, s_history_received_count);
-            // Add data before the end marker to buffer
-            if (i > 0 && s_history_buffer_len + i < HISTORY_BUFFER_SIZE) {
-                memcpy(s_history_buffer + s_history_buffer_len, data, i);
-                s_history_buffer_len += i;
-            }
-            s_history_state = INKBIRD_HISTORY_COMPLETE;
-            if (s_history_complete_sem != NULL) {
-                xSemaphoreGive(s_history_complete_sem);
-            }
-            return;
-        }
-    }
+    // NOTE: End marker (0x6666) is ONLY checked at record boundaries (position 0
+    // in the buffer after processing complete 10-byte records). We do NOT scan
+    // incoming packets for 0x66 0x66 because this byte sequence can appear within
+    // valid record data (e.g., humidity 10.2% + pressure starting with 0x66).
 
     // First response should be record count (2 bytes, big-endian)
     if (s_history_state == INKBIRD_HISTORY_REQUESTING && !s_history_got_count) {
@@ -309,19 +295,23 @@ void inkbird_parse_history_notification(const uint8_t *data, size_t len)
             }
         }
 
-        // Check for end marker in remaining buffer (with validation)
+        // Check for end marker at position 0 in remaining bytes (< 10 bytes left)
+        // The end marker is 2 bytes and appears after all complete 10-byte records.
+        // We only check position 0 (record boundary), not arbitrary positions.
         if (s_history_buffer_len >= 2) {
-            for (size_t i = 0; i <= s_history_buffer_len - 2; i++) {
-                if (s_history_buffer[i] == HISTORY_END_MARKER_HIGH &&
-                    s_history_buffer[i + 1] == HISTORY_END_MARKER_LOW &&
-                    is_valid_end_marker(i, s_history_buffer_len)) {
-                    ESP_LOGI(TAG, "History end marker found at offset %d in buffer (received %u records)",
-                             (int)i, s_history_received_count);
+            if (s_history_buffer[0] == HISTORY_END_MARKER_HIGH &&
+                s_history_buffer[1] == HISTORY_END_MARKER_LOW) {
+                if (is_valid_end_marker(0, s_history_buffer_len)) {
+                    ESP_LOGI(TAG, "History end marker found in remaining buffer (received %u records)",
+                             s_history_received_count);
                     s_history_state = INKBIRD_HISTORY_COMPLETE;
                     if (s_history_complete_sem != NULL) {
                         xSemaphoreGive(s_history_complete_sem);
                     }
                     return;
+                } else {
+                    ESP_LOGW(TAG, "End marker rejected by validation (received=%u, expected=%u)",
+                             s_history_received_count, s_history_expected_count);
                 }
             }
         }
@@ -461,14 +451,52 @@ esp_err_t inkbird_ble_download_history(uint8_t sensor_idx,
         return ret;
     }
 
-    // Wait for history download to complete
-    ESP_LOGI(TAG, "Waiting for history data (timeout: %ds)...",
+    // Wait for history download with stall detection
+    // The sensor may stop sending data without an end marker, so we detect stalls
+    ESP_LOGI(TAG, "Waiting for history data (max timeout: %ds, stall timeout: 3s)...",
              INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS / 1000);
-    got_sem = xSemaphoreTake(s_history_complete_sem, pdMS_TO_TICKS(INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS));
 
-    if (got_sem != pdTRUE) {
-        ESP_LOGW(TAG, "History download timeout");
-        s_history_state = INKBIRD_HISTORY_ERROR;
+    #define POLL_INTERVAL_MS 1000
+    #define STALL_TIMEOUT_MS 3000  // Consider download complete if no data for 3 seconds
+    #define MIN_RECORDS_FOR_STALL_COMPLETE 100  // Only accept stall completion with enough records
+
+    uint32_t start_time = xTaskGetTickCount();
+    uint32_t max_wait_ticks = pdMS_TO_TICKS(INKBIRD_HISTORY_DOWNLOAD_TIMEOUT_MS);
+    s_history_last_recv_time = start_time;  // Initialize last recv time
+
+    while ((xTaskGetTickCount() - start_time) < max_wait_ticks) {
+        got_sem = xSemaphoreTake(s_history_complete_sem, pdMS_TO_TICKS(POLL_INTERVAL_MS));
+
+        if (got_sem == pdTRUE) {
+            // Normal completion (end marker found)
+            ESP_LOGI(TAG, "History download completed normally");
+            break;
+        }
+
+        // Check for stall (no data received recently)
+        uint32_t time_since_last_recv = (xTaskGetTickCount() - s_history_last_recv_time) * portTICK_PERIOD_MS;
+        if (time_since_last_recv >= STALL_TIMEOUT_MS) {
+            if (s_history_received_count >= MIN_RECORDS_FOR_STALL_COMPLETE) {
+                ESP_LOGI(TAG, "Data stall detected after %u records - accepting as complete",
+                         s_history_received_count);
+                s_history_state = INKBIRD_HISTORY_COMPLETE;
+                break;
+            } else {
+                // Not enough records yet, keep waiting (sensor might be slow to start)
+                ESP_LOGD(TAG, "Stall detected but only %u records - waiting for more data",
+                         s_history_received_count);
+            }
+        }
+    }
+
+    if (s_history_state != INKBIRD_HISTORY_COMPLETE) {
+        ESP_LOGW(TAG, "History download timeout (received %u records)", s_history_received_count);
+        // Still accept data if we got a reasonable amount
+        if (s_history_received_count >= MIN_RECORDS_FOR_STALL_COMPLETE) {
+            s_history_state = INKBIRD_HISTORY_COMPLETE;
+        } else {
+            s_history_state = INKBIRD_HISTORY_ERROR;
+        }
     }
 
     // Disconnect
